@@ -25,22 +25,24 @@ final class AppCoordinator {
     /// Validation-only in-memory previews. They are never enabled for normal
     /// app launches and deliberately bypass persistence and notifications.
     private let deadlinePreviewMode = ProcessInfo.processInfo.arguments.contains("--deadline-preview")
-    private let calendarWorkbenchV2PreviewMode = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v2-preview")
+    private let previewTarget = DesktopSentryPreviewRouting.target(
+        arguments: ProcessInfo.processInfo.arguments
+    )
+    private var calendarWorkbenchV2PreviewMode: Bool { previewTarget == .calendarV2 }
     private let calendarWorkbenchV2LightAppearance = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v2-light")
     private let calendarWorkbenchV2DarkAppearance = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v2-dark")
-    private let calendarWorkbenchV21PreviewMode = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v2-1-preview")
+    private var calendarWorkbenchV21PreviewMode: Bool { previewTarget == .calendarV21 }
     private let calendarWorkbenchV21LightAppearance = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v2-1-light")
     private let calendarWorkbenchV21DarkAppearance = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v2-1-dark")
     private let calendarWorkbenchV21TodaySelected = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v2-1-today-selected")
     private let calendarWorkbenchV21NextSelected = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v2-1-next-selected")
-    private let calendarWorkbenchV5PreviewMode = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v5-preview")
-    private let calendarWorkbenchV5OpenAtLaunch = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v5-open")
+    private var calendarWorkbenchV5PreviewMode: Bool { previewTarget == .calendarV5 }
     private let calendarWorkbenchV5LightAppearance = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v5-light")
     private let calendarWorkbenchV5DarkAppearance = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v5-dark")
     private let calendarWorkbenchV5LongList = ProcessInfo.processInfo.arguments.contains("--calendar-workbench-v5-long-list")
 
     private var isolatedPreviewMode: Bool {
-        deadlinePreviewMode || calendarWorkbenchV2PreviewMode || calendarWorkbenchV21PreviewMode || calendarWorkbenchV5PreviewMode
+        deadlinePreviewMode || previewTarget != nil
     }
 
     // MARK: - Domain stores
@@ -63,8 +65,14 @@ final class AppCoordinator {
             self?.deadlineStore.setFocus(id: id)
             self?.openDeadlines()
         }
+        scheduler.onOpenTask = { [weak self] id in
+            self?.pendingV5TaskFocusID = id
+            self?.calendarInteractionEngaged = true
+            self?.openCalendarWorkbenchV5()
+        }
         return scheduler
     }()
+    private lazy var taskNotificationScheduler = V5TaskNotificationScheduler()
     lazy var clipboard: ClipboardService =
         ClipboardService(promptStore: promptStore, settings: settingsStore, feedback: feedback)
 
@@ -105,6 +113,7 @@ final class AppCoordinator {
     private var v5Metadata: [UUID: V5TaskMetadata] = [:]
     private var appDataLoaded = false
     private var calendarWorkbenchV5OpenPending = false
+    private var pendingV5TaskFocusID: UUID?
     private let v5MetadataQueue = DispatchQueue(label: "com.desktopsentry.v5-metadata", qos: .utility)
 
     init() {
@@ -158,6 +167,11 @@ final class AppCoordinator {
                 calendar: .autoupdatingCurrent
             )
             self.v5Metadata = mergedMetadata
+            self.syncV5TaskReminders(
+                tasks: data.tasks,
+                metadata: mergedMetadata,
+                requestAuthorizationIfNeeded: false
+            )
             if mergedMetadata != loadedMetadata {
                 self.requestV5MetadataSave(mergedMetadata)
             }
@@ -187,11 +201,14 @@ final class AppCoordinator {
     func saveImmediately() {
         guard !isolatedPreviewMode else { return }
         saveWorkItem?.cancel(); saveWorkItem = nil
-        storage.save(makeSnapshot())
+        storage.saveAndWait(makeSnapshot())
         deadlineSaveWorkItem?.cancel(); deadlineSaveWorkItem = nil
-        deadlineStorage.save(deadlineStore.deadlines)
+        deadlineStorage.saveAndWait(deadlineStore.deadlines)
         v5MetadataSaveWorkItem?.cancel(); v5MetadataSaveWorkItem = nil
-        try? v5MetadataStore.save(v5Metadata)
+        v5MetadataQueue.sync {
+            do { try v5MetadataStore.save(v5Metadata) }
+            catch { NSLog("[AppCoordinator] final V5 metadata save failed: %@", error.localizedDescription) }
+        }
     }
 
     private func requestDeadlineSave() {
@@ -220,7 +237,7 @@ final class AppCoordinator {
 
     private func wireV5TaskSynchronization() {
         guard v5TaskSubscription == nil else { return }
-        v5TaskSubscription = taskStore.$tasks.sink { [weak self] tasks in
+        v5TaskSubscription = taskStore.$tasks.dropFirst().sink { [weak self] tasks in
             guard let self, self.appDataLoaded else { return }
             let merged = V5TaskMetadataMigration.merge(
                 tasks: tasks,
@@ -232,8 +249,28 @@ final class AppCoordinator {
                 self.v5Metadata = merged
                 self.requestV5MetadataSave(merged)
             }
+            self.syncV5TaskReminders(
+                tasks: tasks,
+                metadata: merged,
+                requestAuthorizationIfNeeded: true
+            )
             self.calendarWorkbenchV5Model?.replaceLegacyTasks(tasks, metadata: merged)
         }
+    }
+
+    private func syncV5TaskReminders(
+        tasks: [TaskItem],
+        metadata: [UUID: V5TaskMetadata],
+        requestAuthorizationIfNeeded: Bool
+    ) {
+        let reminders = V5TaskReminderPlanner.pendingRequests(
+            tasks: tasks,
+            metadata: metadata
+        )
+        taskNotificationScheduler.sync(
+            reminders,
+            requestAuthorizationIfNeeded: requestAuthorizationIfNeeded && !reminders.isEmpty
+        )
     }
 
     private func makeSnapshot() -> AppData {
@@ -281,21 +318,18 @@ final class AppCoordinator {
     // MARK: - Start
 
     func start() {
-        statusBar = StatusBarController(coordinator: self)
+        if DesktopSentryPreviewSurfacePolicy.createsStatusBar(
+            isIsolatedPreview: isolatedPreviewMode
+        ) {
+            statusBar = StatusBarController(coordinator: self)
+        }
         if !isolatedPreviewMode {
             _ = notificationScheduler
             scheduleDeadlineMidnightRefresh()
         }
-        if calendarWorkbenchV2PreviewMode {
-            DispatchQueue.main.async { [weak self] in self?.openCalendarWorkbenchV2() }
-        }
-        if calendarWorkbenchV21PreviewMode {
-            DispatchQueue.main.async { [weak self] in self?.openCalendarWorkbenchV21Clean() }
-        }
-        if calendarWorkbenchV5PreviewMode && calendarWorkbenchV5OpenAtLaunch {
+        if let previewTarget {
             DispatchQueue.main.async { [weak self] in
-                self?.calendarInteractionEngaged = true
-                self?.openCalendarWorkbenchV5()
+                self?.openPreviewTarget(previewTarget)
             }
         }
         if !isolatedPreviewMode {
@@ -334,6 +368,32 @@ final class AppCoordinator {
 
     // MARK: - Actions facade
 
+    func handleApplicationReopen() {
+        guard let previewTarget else {
+            openSearch()
+            return
+        }
+        openPreviewTarget(DesktopSentryPreviewRouting.reopenDestination(for: previewTarget))
+    }
+
+    private func openPreviewTarget(_ target: DesktopSentryPreviewTarget) {
+        if target != .skillManagement {
+            closeSearch()
+        }
+        switch target {
+        case .calendarV5:
+            calendarInteractionEngaged = true
+            openCalendarWorkbenchV5()
+        case .calendarV21:
+            calendarInteractionEngaged = true
+            openCalendarWorkbenchV21Clean()
+        case .calendarV2:
+            openCalendarWorkbenchV2()
+        case .skillManagement:
+            openSearch()
+        }
+    }
+
     var actions: AppActions {
         AppActions(
             openSearch:   { [weak self] in self?.openSearch() },
@@ -359,12 +419,14 @@ final class AppCoordinator {
                 movableByWindowBackground: false
             )
             searchPanel = panel
-            searchPanelDismissObserver = NotificationCenter.default.addObserver(
-                forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
-            ) { [weak self, weak panel] _ in
-                DispatchQueue.main.async {
-                    guard let self, self.searchPanel === panel else { return }
-                    self.releaseSearchPanel()
+            if DesktopSentryPreviewWindowPolicy.dismissesOnOutsideClick(target: previewTarget) {
+                searchPanelDismissObserver = NotificationCenter.default.addObserver(
+                    forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
+                ) { [weak self, weak panel] _ in
+                    DispatchQueue.main.async {
+                        guard let self, self.searchPanel === panel else { return }
+                        self.releaseSearchPanel()
+                    }
                 }
             }
         }
@@ -441,6 +503,9 @@ final class AppCoordinator {
     }
 
     func calendarPointerExited() {
+        guard DesktopSentryPreviewWindowPolicy.dismissesOnOutsideClick(target: previewTarget) else {
+            return
+        }
         guard calendarHoverDismissArmed, !calendarInteractionEngaged else { return }
         calendarHoverCloseWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -625,12 +690,14 @@ final class AppCoordinator {
             calendarWorkbenchV5Panel = panel
             applyCalendarWorkbenchV5Appearance(calendarWorkbenchV5AppearancePreference)
 
-            calendarWorkbenchV5OutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self, weak panel] _ in
-                DispatchQueue.main.async {
-                    guard let self, self.calendarWorkbenchV5Panel === panel,
-                          let panel, panel.isVisible,
-                          !panel.frame.contains(NSEvent.mouseLocation) else { return }
-                    self.dismissCalendarWorkbenchV5(animated: true)
+            if DesktopSentryPreviewWindowPolicy.dismissesOnOutsideClick(target: previewTarget) {
+                calendarWorkbenchV5OutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self, weak panel] _ in
+                    DispatchQueue.main.async {
+                        guard let self, self.calendarWorkbenchV5Panel === panel,
+                              let panel, panel.isVisible,
+                              !panel.frame.contains(NSEvent.mouseLocation) else { return }
+                        self.dismissCalendarWorkbenchV5(animated: true)
+                    }
                 }
             }
             calendarWorkbenchV5LocalClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self, weak panel] event in
@@ -645,6 +712,14 @@ final class AppCoordinator {
         }
 
         calendarWorkbenchV5Model?.refreshToday()
+        if let pendingV5TaskFocusID,
+           let task = calendarWorkbenchV5Model?.task(id: pendingV5TaskFocusID) {
+            if let dueDate = task.metadata.dueDate {
+                calendarWorkbenchV5Model?.select(dueDate)
+            }
+            calendarWorkbenchV5Model?.selectTask(id: pendingV5TaskFocusID)
+            self.pendingV5TaskFocusID = nil
+        }
         guard let panel = calendarWorkbenchV5Panel else { return }
         let shouldReposition = CalendarPanelPresentationPolicy.shouldReposition(isVisible: panel.isVisible)
         if shouldReposition {
@@ -776,16 +851,18 @@ final class AppCoordinator {
             // Dismiss only for a real pointer click outside the panel. Key-window
             // changes also happen during launch and app switching, and treating
             // those as clicks made the isolated preview close itself at startup.
-            calendarWorkbenchV21OutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
-                matching: [.leftMouseDown, .rightMouseDown]
-            ) { [weak self, weak panel] _ in
-                DispatchQueue.main.async {
-                    guard let self,
-                          self.calendarWorkbenchV21Panel === panel,
-                          let panel,
-                          panel.isVisible,
-                          !panel.frame.contains(NSEvent.mouseLocation) else { return }
-                    self.dismissCalendarWorkbenchV21(animated: true)
+            if DesktopSentryPreviewWindowPolicy.dismissesOnOutsideClick(target: previewTarget) {
+                calendarWorkbenchV21OutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+                    matching: [.leftMouseDown, .rightMouseDown]
+                ) { [weak self, weak panel] _ in
+                    DispatchQueue.main.async {
+                        guard let self,
+                              self.calendarWorkbenchV21Panel === panel,
+                              let panel,
+                              panel.isVisible,
+                              !panel.frame.contains(NSEvent.mouseLocation) else { return }
+                        self.dismissCalendarWorkbenchV21(animated: true)
+                    }
                 }
             }
             calendarWorkbenchV21LocalClickMonitor = NSEvent.addLocalMonitorForEvents(
@@ -806,7 +883,9 @@ final class AppCoordinator {
                    anchor.insetBy(dx: -2, dy: -2).contains(NSEvent.mouseLocation) {
                     return event
                 }
-                self.dismissCalendarWorkbenchV21(animated: true)
+                if DesktopSentryPreviewWindowPolicy.dismissesOnOutsideClick(target: self.previewTarget) {
+                    self.dismissCalendarWorkbenchV21(animated: true)
+                }
                 return event
             }
         }
@@ -876,16 +955,18 @@ final class AppCoordinator {
             }
             calendarWorkbenchV21CleanPanel = panel
 
-            calendarWorkbenchV21CleanOutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
-                matching: [.leftMouseDown, .rightMouseDown]
-            ) { [weak self, weak panel] _ in
-                DispatchQueue.main.async {
-                    guard let self,
-                          self.calendarWorkbenchV21CleanPanel === panel,
-                          let panel,
-                          panel.isVisible,
-                          !panel.frame.contains(NSEvent.mouseLocation) else { return }
-                    panel.orderOut(nil)
+            if DesktopSentryPreviewWindowPolicy.dismissesOnOutsideClick(target: previewTarget) {
+                calendarWorkbenchV21CleanOutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+                    matching: [.leftMouseDown, .rightMouseDown]
+                ) { [weak self, weak panel] _ in
+                    DispatchQueue.main.async {
+                        guard let self,
+                              self.calendarWorkbenchV21CleanPanel === panel,
+                              let panel,
+                              panel.isVisible,
+                              !panel.frame.contains(NSEvent.mouseLocation) else { return }
+                        panel.orderOut(nil)
+                    }
                 }
             }
             calendarWorkbenchV21CleanLocalClickMonitor = NSEvent.addLocalMonitorForEvents(
@@ -895,7 +976,8 @@ final class AppCoordinator {
                       self.calendarWorkbenchV21CleanPanel === panel,
                       let panel,
                       panel.isVisible else { return event }
-                if event.window !== panel && event.window?.parent !== panel {
+                if DesktopSentryPreviewWindowPolicy.dismissesOnOutsideClick(target: self.previewTarget),
+                   event.window !== panel && event.window?.parent !== panel {
                     panel.orderOut(nil)
                 }
                 return event

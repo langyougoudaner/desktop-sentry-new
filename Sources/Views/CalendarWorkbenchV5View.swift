@@ -3,6 +3,7 @@ import AppKit
 
 struct V5DragWorkbenchPoints: Equatable {
     var taskSources: [UUID: CGPoint] = [:]
+    var taskFrames: [UUID: CGRect] = [:]
     var dayIndicators: [Date: CGPoint] = [:]
 }
 
@@ -13,6 +14,7 @@ struct V5DragWorkbenchPointsPreferenceKey: PreferenceKey {
                        nextValue: () -> V5DragWorkbenchPoints) {
         let next = nextValue()
         value.taskSources.merge(next.taskSources, uniquingKeysWith: { _, new in new })
+        value.taskFrames.merge(next.taskFrames, uniquingKeysWith: { _, new in new })
         value.dayIndicators.merge(next.dayIndicators, uniquingKeysWith: { _, new in new })
     }
 }
@@ -25,13 +27,16 @@ struct CalendarWorkbenchV5View: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.controlActiveState) private var controlActiveState
     @AppStorage("calendarWorkbenchV5Appearance") private var appearanceRaw = V5AppearancePreference.system.rawValue
     @Namespace private var liquidSelection
-    @FocusState private var composerFocused: Bool
     @State private var dayFrames: [Date: CGRect] = [:]
     @State private var dragWorkbenchPoints = V5DragWorkbenchPoints()
     @State private var taskDrag: V5TaskDragSession?
-    @State private var dropPulseDate: Date?
+    @State private var completionFlights: [UUID: V5TaskCompletionFlightSession] = [:]
+    @State private var completionLifecycle = V5TaskCompletionLifecycle()
+    @State private var pendingCompletion: V5PendingTaskCompletion?
+    @State private var dropPulseDates: Set<Date> = []
     @State private var revealedTaskID: UUID?
     @State private var visualAppearance: V5AppearancePreference?
     @State private var appearanceTransitionID = UUID()
@@ -50,18 +55,35 @@ struct CalendarWorkbenchV5View: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .coordinateSpace(name: "v5-workbench")
         .onPreferenceChange(V5DayFramePreferenceKey.self) { dayFrames = $0 }
-        .onPreferenceChange(V5DragWorkbenchPointsPreferenceKey.self) { dragWorkbenchPoints = $0 }
+        .onPreferenceChange(V5DragWorkbenchPointsPreferenceKey.self) { points in
+            dragWorkbenchPoints = points
+            startPendingCompletionIfPossible(using: points)
+        }
         .overlay(alignment: .topLeading) {
-            if let taskDrag,
-               let position = V5ResolvedTaskDragGeometry.renderedPosition(
-                   for: taskDrag.phase,
-                   pointer: taskDrag.location,
-                   sourceAnchor: taskDrag.sourcePoint,
-                   targetAnchor: taskDrag.targetPoint
-               ) {
-                V5TaskDragOrb(session: taskDrag, position: position, reduceMotion: reduceMotion)
-                    .allowsHitTesting(false)
+            ZStack(alignment: .topLeading) {
+                if let revealedTaskID, let frame = dragWorkbenchPoints.taskFrames[revealedTaskID] {
+                    V5TaskLandingOutline(frame: frame)
+                        .id(revealedTaskID)
+                        .transition(.opacity.animation(.easeOut(
+                            duration: reduceMotion
+                                ? 0.08
+                                : V5TaskRowRevealPresentation.value.landingOutlineDuration
+                        )))
+                }
+                if let taskDrag,
+                   let position = V5ResolvedTaskDragGeometry.renderedPosition(
+                       for: taskDrag.phase,
+                       pointer: taskDrag.location,
+                       sourceAnchor: taskDrag.sourcePoint,
+                       targetAnchor: taskDrag.targetPoint
+                   ) {
+                    V5TaskDragOrb(session: taskDrag, position: position, reduceMotion: reduceMotion)
+                }
+                ForEach(Array(completionFlights.values), id: \.id) { flight in
+                    V5TaskCompletionFlightView(session: flight)
+                }
             }
+            .allowsHitTesting(false)
         }
         .preferredColorScheme(appearance.colorScheme)
         .onAppear {
@@ -69,7 +91,47 @@ struct CalendarWorkbenchV5View: View {
             onAppearanceChange(appearance)
         }
         .onChange(of: appearanceRaw) { onAppearanceChange(appearance) }
-        .onKeyPress(.escape) { onClose(); return .handled }
+        .onChange(of: model.selectedDate) { _, _ in
+            _ = completionLifecycle.navigate()
+            completionFlights.removeAll()
+            pendingCompletion = nil
+            dropPulseDates.removeAll()
+            cancelTaskDrag()
+        }
+        .onChange(of: model.displayedMonth) { _, newMonth in
+            // A pending off-screen completion owns this one month change. Any
+            // other month change invalidates captured calendar coordinates.
+            if let pendingCompletion,
+               let dueDate = pendingCompletion.task.metadata.dueDate,
+               model.calendar.isDate(newMonth, equalTo: dueDate, toGranularity: .month) {
+                return
+            }
+            pendingCompletion = nil
+            _ = completionLifecycle.calendarChanged()
+            completionFlights.removeAll()
+            dropPulseDates.removeAll()
+        }
+        .onChange(of: controlActiveState) { _, state in
+            if state == .inactive {
+                _ = completionLifecycle.cancelAll()
+                completionFlights.removeAll()
+                pendingCompletion = nil
+                dropPulseDates.removeAll()
+                cancelTaskDrag()
+            }
+        }
+        .onDisappear {
+            _ = completionLifecycle.cancelAll()
+            completionFlights.removeAll()
+            pendingCompletion = nil
+            dropPulseDates.removeAll()
+            cancelTaskDrag()
+        }
+        .onKeyPress(.escape) {
+            cancelTaskDrag()
+            onClose()
+            return .handled
+        }
     }
 
     private var calendarPane: some View {
@@ -110,9 +172,9 @@ struct CalendarWorkbenchV5View: View {
                         isDropTarget: taskDrag?.targetDate.map {
                             model.calendar.isDate($0, inSameDayAs: date)
                         } == true,
-                        isDropArrival: dropPulseDate.map {
-                            model.calendar.isDate($0, inSameDayAs: date)
-                        } == true
+                        isDropArrival: dropPulseDates.contains { pulseDate in
+                            model.calendar.isDate(pulseDate, inSameDayAs: date)
+                        }
                     ) {
                         animate { model.select(date) }
                     }
@@ -138,8 +200,10 @@ struct CalendarWorkbenchV5View: View {
             model: model,
             appearance: visualAppearance ?? appearance,
             onSelectAppearance: selectAppearance,
-            draggingTaskID: taskDrag?.taskID,
+            completingTaskIDs: Set(completionFlights.values.map(\.taskID)),
+            taskInteractionLocked: !canBeginTaskCompletion,
             revealedTaskID: revealedTaskID,
+            onToggleTask: beginTaskCompletion,
             onTaskDragChanged: updateTaskDrag,
             onTaskDragEnded: finishTaskDrag,
             onClose: onClose
@@ -165,10 +229,150 @@ struct CalendarWorkbenchV5View: View {
         }
     }
 
+    private func beginTaskCompletion(_ task: CalendarWorkbenchV5Task) {
+        // Calendar coordinates belong to one spatial transaction at a time.
+        // Starting another completion while a flight is active could move the
+        // visible month underneath the first flight and invalidate its target.
+        guard canBeginTaskCompletion else { return }
+        if task.legacy.isCompleted {
+            withAnimation(rowMutationAnimation) {
+                model.setCompletion(id: task.id, completed: false)
+            }
+            return
+        }
+        let transition = V5TaskCompletionTransition.resolve(
+            dueDate: task.metadata.dueDate,
+            selectedDate: model.selectedDate,
+            today: model.today,
+            calendar: model.calendar
+        )
+        if transition == .inline {
+            withAnimation(rowMutationAnimation) {
+                model.setCompletion(id: task.id, completed: true)
+            }
+            return
+        }
+        guard pendingCompletion?.task.id != task.id else { return }
+        guard let sourceFrame = dragWorkbenchPoints.taskFrames[task.id],
+              let dueDate = task.metadata.dueDate else { return }
+        let sourceRing = dragWorkbenchPoints.taskSources[task.id]
+            ?? CGPoint(x: sourceFrame.minX + 22, y: sourceFrame.midY)
+        let pending = V5PendingTaskCompletion(
+            task: task,
+            sourceFrame: sourceFrame,
+            sourceRingPoint: sourceRing
+        )
+        if let targetPoint = indicatorPoint(for: dueDate, in: dragWorkbenchPoints) {
+            startTaskCompletion(pending, targetPoint: targetPoint)
+            return
+        }
+
+        // The real calendar cell is the only legal destination. Reveal its
+        // month and let the next geometry preference update start the flight.
+        pendingCompletion = pending
+        withAnimation(reduceMotion ? .easeOut(duration: 0.08) : .easeInOut(duration: 0.16)) {
+            model.revealMonth(containing: dueDate)
+        }
+    }
+
+    private func startPendingCompletionIfPossible(using points: V5DragWorkbenchPoints) {
+        guard let pending = pendingCompletion,
+              let dueDate = pending.task.metadata.dueDate,
+              let targetPoint = indicatorPoint(for: dueDate, in: points) else { return }
+        pendingCompletion = nil
+        startTaskCompletion(pending, targetPoint: targetPoint)
+    }
+
+    private func indicatorPoint(for date: Date, in points: V5DragWorkbenchPoints) -> CGPoint? {
+        points.dayIndicators.first { candidate, _ in
+            model.calendar.isDate(candidate, inSameDayAs: date)
+        }?.value
+    }
+
+    private func startTaskCompletion(
+        _ pending: V5PendingTaskCompletion,
+        targetPoint: CGPoint
+    ) {
+        let task = pending.task
+        guard let dueDate = task.metadata.dueDate else { return }
+
+        let flight = V5TaskCompletionFlightSession(
+            id: UUID(), taskID: task.id, title: task.legacy.title,
+            dateText: shortDate(dueDate),
+            sourceFrame: pending.sourceFrame,
+            sourceRingPoint: pending.sourceRingPoint,
+            targetPoint: targetPoint,
+            targetDate: dueDate,
+            accent: .resolve(
+                isOverdue: model.calendar.startOfDay(for: dueDate) < model.today
+            ),
+            phase: .card
+        )
+        model.clearTaskSelection()
+        completionLifecycle.begin(sessionID: flight.id, taskID: task.id)
+        completionFlights[flight.id] = flight
+
+        if reduceMotion {
+            withAnimation(.easeOut(duration: V5TaskCompletionFlightTiming.reducedMotionCommitDelay)) {
+                completionFlights[flight.id]?.phase = .orb
+            }
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + V5TaskCompletionFlightTiming.reducedMotionCommitDelay
+            ) { finishTaskCompletion(flight.id) }
+            return
+        }
+
+        DispatchQueue.main.async {
+            guard completionFlights[flight.id] != nil else { return }
+            withAnimation(.easeInOut(duration: V5TaskCompletionFlightTiming.collapseDuration)) {
+                completionFlights[flight.id]?.phase = .orb
+            }
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + V5TaskCompletionFlightTiming.collapseDuration
+        ) {
+            guard completionFlights[flight.id] != nil else { return }
+            withAnimation(.timingCurve(
+                0.22, 0.61, 0.36, 1,
+                duration: V5TaskCompletionFlightTiming.travelDuration
+            )) {
+                completionFlights[flight.id]?.phase = .arrived
+            }
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + V5TaskCompletionFlightTiming.modelCommitDelay
+        ) { finishTaskCompletion(flight.id) }
+    }
+
+    private func finishTaskCompletion(_ sessionID: UUID) {
+        guard let taskID = completionLifecycle.arrive(sessionID: sessionID),
+              let flight = completionFlights.removeValue(forKey: sessionID),
+              taskID == flight.taskID else { return }
+        withAnimation(.easeOut(duration: 0.12)) {
+            _ = dropPulseDates.insert(flight.targetDate)
+        }
+        withAnimation(rowMutationAnimation) {
+            model.setCompletion(id: taskID, completed: true)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            withAnimation(.easeOut(duration: 0.12)) { _ = dropPulseDates.remove(flight.targetDate) }
+        }
+    }
+
+    private var rowMutationAnimation: Animation {
+        reduceMotion ? .easeOut(duration: 0.08) : .interactiveSpring(response: 0.30, dampingFraction: 0.88)
+    }
+
+    private var canBeginTaskCompletion: Bool {
+        V5TaskCompletionAdmission.canBegin(
+            hasActiveFlight: !completionFlights.isEmpty,
+            hasPendingTarget: pendingCompletion != nil
+        )
+    }
+
     private func updateTaskDrag(_ task: CalendarWorkbenchV5Task,
                                 location: CGPoint, startLocation _: CGPoint) {
-        guard !task.legacy.isCompleted else { return }
-        let targetDate = V5TaskDropGeometry.targetDate(at: location, dayFrames: dayFrames)
+        let targetDate = permittedDropDate(for: task, at: location)
         let phase: V5TaskDragPhase = targetDate == nil ? .dragging : .targeted
 
         if taskDrag?.taskID != task.id {
@@ -218,8 +422,9 @@ struct CalendarWorkbenchV5View: View {
 
     private func finishTaskDrag(_ task: CalendarWorkbenchV5Task, location: CGPoint) {
         guard var session = taskDrag, session.taskID == task.id else { return }
-        let targetDate = V5TaskDropGeometry.targetDate(at: location, dayFrames: dayFrames)
-            ?? session.targetDate
+        let targetDate = V5TaskDropCommitPolicy.resolvedTarget(
+            atRelease: permittedDropDate(for: task, at: location)
+        )
         let isSameDay = targetDate.flatMap { target in
             session.sourceDate.map { model.calendar.isDate($0, inSameDayAs: target) }
         } == true
@@ -242,8 +447,8 @@ struct CalendarWorkbenchV5View: View {
         let settleDelay = reduceMotion ? 0.06 : V5TaskDropAnimationTiming.modelCommitDelay
         DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
             guard taskDrag?.id == session.id else { return }
-            model.moveTask(id: task.id, to: targetDate)
             taskDrag = nil
+            model.moveTask(id: task.id, to: targetDate)
             withAnimation(revealSpring) {
                 revealedTaskID = task.id
             }
@@ -255,11 +460,22 @@ struct CalendarWorkbenchV5View: View {
         }
     }
 
+    private func permittedDropDate(for task: CalendarWorkbenchV5Task, at location: CGPoint) -> Date? {
+        guard let candidate = V5TaskDropGeometry.targetDate(at: location, dayFrames: dayFrames) else {
+            return nil
+        }
+        return model.canMoveTask(id: task.id, to: candidate) ? candidate : nil
+    }
+
     private func clearDragSession(_ sessionID: UUID, after delay: Double) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             guard taskDrag?.id == sessionID else { return }
             withAnimation(.easeOut(duration: reduceMotion ? 0.05 : 0.12)) { taskDrag = nil }
         }
+    }
+
+    private func cancelTaskDrag() {
+        taskDrag = nil
     }
 
     private var dragSpring: Animation {
@@ -282,92 +498,6 @@ struct CalendarWorkbenchV5View: View {
         V5AppearancePreference(rawValue: appearanceRaw) ?? .system
     }
 
-    private var composer: some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 8) {
-                Image(systemName: "plus.circle.fill").font(.system(size: 18)).foregroundStyle(Color.accentColor)
-                TextField("添加待办到 \(shortDate(model.draftDate))", text: $model.draftTitle)
-                    .textFieldStyle(.plain).focused($composerFocused)
-                    .onSubmit { addTask() }.accessibilityIdentifier("v5-add-title")
-                Button("添加") { addTask() }.buttonStyle(.borderedProminent).controlSize(.small)
-                    .disabled(model.draftTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("v5-add")
-            }
-            HStack(spacing: 8) {
-                DatePicker("", selection: $model.draftDate, displayedComponents: .date).labelsHidden().controlSize(.small)
-                TextField("简短描述（可选）", text: $model.draftDetails).textFieldStyle(.roundedBorder)
-                Toggle("提醒", isOn: $model.draftReminderEnabled).toggleStyle(.checkbox).controlSize(.small)
-            }
-            if model.draftReminderEnabled {
-                HStack {
-                    Text("提醒时间").font(.caption).foregroundStyle(.secondary)
-                    DatePicker("", selection: $model.draftReminder, displayedComponents: [.date, .hourAndMinute]).labelsHidden().controlSize(.small)
-                    Spacer()
-                }
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
-            }
-        }
-        .padding(11)
-        .background(cardFill, in: RoundedRectangle(cornerRadius: model.draftReminderEnabled ? 15 : 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: model.draftReminderEnabled ? 15 : 12).strokeBorder(Color.accentColor.opacity(0.18)))
-        .animation(reduceMotion ? .easeOut(duration: 0.1) : .spring(response: 0.28, dampingFraction: 0.88), value: model.draftReminderEnabled)
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 7) {
-                Image(systemName: "checkmark.circle").font(.system(size: 24)).foregroundStyle(Color.accentColor)
-                Text("这一天很轻松").font(.subheadline.weight(.semibold))
-                Text("从上方直接添加，日期已经替你选好；只有主动打开“提醒”才会设置提醒。")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-            .background(cardFill, in: RoundedRectangle(cornerRadius: 12))
-            Spacer(minLength: 0)
-        }
-    }
-
-    @ViewBuilder private func taskRow(_ task: CalendarWorkbenchV5Task) -> some View {
-        if model.editingTaskID == task.id {
-            V5TaskEditor(task: task, model: model, reduceMotion: reduceMotion)
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
-        } else {
-            HStack(alignment: .top, spacing: 10) {
-                Button { animate { model.toggleCompletion(id: task.id) } } label: {
-                    Image(systemName: task.legacy.isCompleted ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 18)).foregroundStyle(task.legacy.isCompleted ? Color.accentColor : Color.secondary)
-                        .frame(width: 22, height: 26)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(task.legacy.isCompleted ? "恢复待办" : "完成待办")
-                .accessibilityIdentifier("v5-toggle-\(task.id.uuidString)")
-
-                Button { animate { model.beginEditing(task) } } label: {
-                    HStack(alignment: .top, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(task.legacy.title).font(.subheadline.weight(.medium)).strikethrough(task.legacy.isCompleted)
-                            .foregroundStyle(task.legacy.isCompleted ? .secondary : .primary)
-                        if !task.metadata.details.isEmpty { Text(task.metadata.details).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
-                        HStack(spacing: 8) {
-                            if let date = task.metadata.dueDate { Label(shortDate(date), systemImage: "calendar") }
-                            if task.metadata.reminderAt != nil { Image(systemName: "bell.fill").foregroundStyle(Color.orange) }
-                            if !task.legacy.tag.isEmpty { Text(task.legacy.tag) }
-                        }.font(.system(size: 10)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-                }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("v5-task-\(task.id.uuidString)")
-            }
-            .padding(10)
-            .background(cardFill, in: RoundedRectangle(cornerRadius: 11))
-        }
-    }
-
-    private func addTask() { animate { model.addDraft() }; composerFocused = true }
     private func moveMonth(_ amount: Int) { animate { model.moveMonth(by: amount) } }
     private func animate(_ body: () -> Void) { withAnimation(reduceMotion ? .easeOut(duration: 0.1) : .interactiveSpring(response: 0.28, dampingFraction: 0.86), body) }
     private func shortDate(_ date: Date) -> String { Self.shortFormatter.string(from: date) }
@@ -377,7 +507,6 @@ struct CalendarWorkbenchV5View: View {
             .buttonStyle(.borderless).accessibilityLabel(label)
     }
 
-    private var cardFill: Color { Color.white.opacity(colorScheme == .dark ? 0.075 : 0.48) }
     private var rootTint: Color {
         if reduceTransparency { return Color(nsColor: .windowBackgroundColor) }
         return colorScheme == .dark ? Color(red: 0.025, green: 0.065, blue: 0.11).opacity(0.42) : Color.white.opacity(0.18)
@@ -419,6 +548,10 @@ private struct V5DayCell: View {
 
     private var indicatorLayout: V5DayIndicatorLayout {
         .value(total: taskCounts.total, isToday: isToday)
+    }
+
+    private var arrivalPresentation: V5DayIndicatorArrivalPresentation {
+        .value(isArriving: isDropArrival)
     }
 
     var body: some View {
@@ -486,6 +619,11 @@ private struct V5DayCell: View {
                         }
                     }
                     .frame(width: 7, height: 7)
+                    .scaleEffect(arrivalPresentation.markerScale)
+                    .shadow(
+                        color: Color.accentColor.opacity(arrivalPresentation.glowOpacity),
+                        radius: arrivalPresentation.glowRadius
+                    )
                     .background {
                         GeometryReader { proxy in
                             let frame = proxy.frame(in: .named("v5-workbench"))
@@ -510,9 +648,6 @@ private struct V5DayCell: View {
                 .opacity(indicatorStyle == .none ? 0 : 1)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.bottom, V5DayCellPresentation.indicatorBottomPadding)
-                .scaleEffect(isDropArrival ? 1.65 : 1)
-                .shadow(color: Color.accentColor.opacity(isDropArrival ? 0.68 : 0),
-                        radius: isDropArrival ? 6 : 0)
             }
             .frame(width: 82, height: 78)
             .contentShape(Rectangle())
@@ -527,8 +662,7 @@ private struct V5DayCell: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .animation(reduceMotion ? .easeOut(duration: 0.08) :
-                    .interactiveSpring(response: 0.24, dampingFraction: 0.84),
+        .animation(reduceMotion ? .easeOut(duration: 0.08) : .easeOut(duration: 0.18),
                    value: isDropArrival)
         .accessibilityLabel(Self.accessibilityFormatter.string(from: date))
     }
@@ -549,6 +683,115 @@ private struct V5TaskDragSession: Equatable {
     var targetDate: Date?
     var targetPoint: CGPoint?
     var phase: V5TaskDragPhase
+}
+
+private struct V5TaskCompletionFlightSession: Equatable {
+    let id: UUID
+    let taskID: UUID
+    let title: String
+    let dateText: String
+    let sourceFrame: CGRect
+    let sourceRingPoint: CGPoint
+    let targetPoint: CGPoint
+    let targetDate: Date
+    let accent: V5TaskCompletionAccent
+    var phase: V5TaskCompletionFlightPhase
+}
+
+private struct V5PendingTaskCompletion: Equatable {
+    let task: CalendarWorkbenchV5Task
+    let sourceFrame: CGRect
+    let sourceRingPoint: CGPoint
+}
+
+private struct V5TaskCompletionFlightView: View {
+    let session: V5TaskCompletionFlightSession
+
+    private var geometry: V5TaskCompletionFlightGeometry {
+        V5TaskCompletionFlightGeometry.value(
+            for: session.phase,
+            sourceFrame: session.sourceFrame,
+            sourceRing: session.sourceRingPoint,
+            target: session.targetPoint
+        )
+    }
+
+    private var ringColor: Color {
+        session.accent == .overdue ? .orange : Color.primary.opacity(0.86)
+    }
+
+    private var cardScaleAnchor: UnitPoint {
+        let width = max(session.sourceFrame.width, 1)
+        let height = max(session.sourceFrame.height, 1)
+        return UnitPoint(
+            x: min(1, max(0, (session.sourceRingPoint.x - session.sourceFrame.minX) / width)),
+            y: min(1, max(0, (session.sourceRingPoint.y - session.sourceFrame.minY) / height))
+        )
+    }
+
+    var body: some View {
+        ZStack {
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.94))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                    }
+                HStack(spacing: 10) {
+                    Circle().strokeBorder(ringColor, lineWidth: 1.7)
+                        .frame(width: 20, height: 20)
+                    Text(session.dateText)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(session.accent == .overdue ? Color.orange : Color.secondary)
+                    Text(session.title)
+                        .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+            }
+            .frame(width: session.sourceFrame.width, height: session.sourceFrame.height)
+            .scaleEffect(geometry.cardScale, anchor: cardScaleAnchor)
+            .opacity(geometry.cardOpacity)
+            .blur(radius: session.phase == .card ? 0 : 1.2)
+            .position(geometry.cardCenter)
+
+            Circle()
+                .strokeBorder(ringColor, lineWidth: session.phase == .arrived ? 1.35 : 2)
+                .frame(width: geometry.ringDiameter, height: geometry.ringDiameter)
+                .opacity(geometry.ringOpacity)
+                .shadow(color: ringColor.opacity(session.phase == .arrived ? 0.36 : 0.58),
+                        radius: session.phase == .arrived ? 3 : 7)
+                .position(geometry.ringCenter)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct V5TaskLandingOutline: View {
+    let frame: CGRect
+
+    private let presentation = V5TaskRowRevealPresentation.value
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: presentation.landingOutlineCornerRadius,
+                         style: .continuous)
+            .stroke(
+                Color.accentColor.opacity(0.88),
+                lineWidth: 1.5
+            )
+            .frame(
+                width: frame.width + presentation.landingOutlineOutset * 2,
+                height: frame.height + presentation.landingOutlineOutset * 2
+            )
+            .shadow(
+                color: Color.accentColor.opacity(0.34),
+                radius: presentation.perimeterGlowRadius
+            )
+            .position(x: frame.midX, y: frame.midY)
+            .accessibilityHidden(true)
+    }
 }
 
 private struct V5TaskDragOrb: View {
@@ -591,48 +834,5 @@ private struct V5DayFramePreferenceKey: PreferenceKey {
 
     static func reduce(value: inout [Date: CGRect], nextValue: () -> [Date: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, next in next })
-    }
-}
-
-private struct V5TaskEditor: View {
-    let task: CalendarWorkbenchV5Task
-    @ObservedObject var model: CalendarWorkbenchV5Model
-    let reduceMotion: Bool
-    @State private var title: String
-    @State private var details: String
-    @State private var date: Date
-    @State private var reminderEnabled: Bool
-    @State private var reminder: Date
-
-    init(task: CalendarWorkbenchV5Task, model: CalendarWorkbenchV5Model, reduceMotion: Bool) {
-        self.task = task; self.model = model; self.reduceMotion = reduceMotion
-        _title = State(initialValue: task.legacy.title)
-        _details = State(initialValue: task.metadata.details)
-        _date = State(initialValue: task.metadata.dueDate ?? model.selectedDate)
-        _reminderEnabled = State(initialValue: task.metadata.reminderAt != nil)
-        _reminder = State(initialValue: task.metadata.reminderAt ?? model.selectedDate)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TextField("待办标题", text: $title).textFieldStyle(.roundedBorder)
-            TextField("简短描述", text: $details).textFieldStyle(.roundedBorder)
-            HStack {
-                DatePicker("", selection: $date, displayedComponents: .date).labelsHidden().controlSize(.small)
-                Toggle("提醒", isOn: $reminderEnabled).toggleStyle(.checkbox).controlSize(.small)
-                Spacer()
-            }
-            if reminderEnabled { DatePicker("提醒时间", selection: $reminder, displayedComponents: [.date, .hourAndMinute]).controlSize(.small) }
-            HStack {
-                Button("取消") { model.endEditing() }.buttonStyle(.bordered).controlSize(.small)
-                Spacer()
-                Button("保存") { model.update(id: task.id, title: title, details: details, date: date, reminderEnabled: reminderEnabled, reminder: reminder) }
-                    .buttonStyle(.borderedProminent).controlSize(.small).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("v5-save-edit")
-            }
-        }
-        .padding(11).background(Color.accentColor.opacity(0.075), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.accentColor.opacity(0.34)))
-        .animation(reduceMotion ? .easeOut(duration: 0.1) : .spring(response: 0.26, dampingFraction: 0.9), value: reminderEnabled)
     }
 }

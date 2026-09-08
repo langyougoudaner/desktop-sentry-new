@@ -13,7 +13,9 @@ APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
-MODULE_CACHE_DIR="${BUILD_DIR}/ModuleCache"
+# All disposable previews and test builds can share one compiler cache. This
+# keeps each preview bundle small instead of cloning ~100-200 MB of modules.
+MODULE_CACHE_DIR="${DESKTOP_SENTRY_MODULE_CACHE_DIR:-${BUILD_DIR}/ModuleCache}"
 
 # ── Detect architecture ──
 ARCH="$(uname -m)"
@@ -82,6 +84,7 @@ SOURCES=(
     "${SCRIPT_DIR}/Sources/Models/CalendarWorkbenchV21PreviewModel.swift"
     "${SCRIPT_DIR}/Sources/Models/CalendarWorkbenchV21CleanModel.swift"
     "${SCRIPT_DIR}/Sources/Models/CalendarWorkbenchV5Model.swift"
+    "${SCRIPT_DIR}/Sources/Models/V5TaskReminderPlanner.swift"
     "${SCRIPT_DIR}/Sources/Models/V5WorkbenchPresentation.swift"
     "${SCRIPT_DIR}/Sources/Store/StorageManager.swift"
     "${SCRIPT_DIR}/Sources/Store/DeadlineStorage.swift"
@@ -96,7 +99,9 @@ SOURCES=(
     "${SCRIPT_DIR}/Sources/Services/TitleBuilder.swift"
     "${SCRIPT_DIR}/Sources/Services/HotKeyManager.swift"
     "${SCRIPT_DIR}/Sources/Services/DeadlineNotificationScheduler.swift"
+    "${SCRIPT_DIR}/Sources/Services/V5TaskNotificationScheduler.swift"
     "${SCRIPT_DIR}/Sources/Services/SkillScanner.swift"
+    "${SCRIPT_DIR}/Sources/App/DesktopSentryPreviewRouting.swift"
     "${SCRIPT_DIR}/Sources/App/AppCoordinator.swift"
     "${SCRIPT_DIR}/Sources/Panel/PanelFactory.swift"
     "${SCRIPT_DIR}/Sources/Panel/CalendarPanelPositioning.swift"

@@ -5,8 +5,10 @@ struct CalendarWorkbenchV5Sidebar: View {
     @ObservedObject var model: CalendarWorkbenchV5Model
     let appearance: V5AppearancePreference
     let onSelectAppearance: (V5AppearancePreference) -> Void
-    let draggingTaskID: UUID?
+    let completingTaskIDs: Set<UUID>
+    let taskInteractionLocked: Bool
     let revealedTaskID: UUID?
+    let onToggleTask: (CalendarWorkbenchV5Task) -> Void
     let onTaskDragChanged: (CalendarWorkbenchV5Task, CGPoint, CGPoint) -> Void
     let onTaskDragEnded: (CalendarWorkbenchV5Task, CGPoint) -> Void
     let onClose: () -> Void
@@ -17,6 +19,7 @@ struct CalendarWorkbenchV5Sidebar: View {
     @FocusState private var composerFocused: Bool
     @State private var hoveredTaskID: UUID?
     @State private var rightMouseMonitor: Any?
+    @State private var completedExpanded = false
 
     var body: some View {
         Group {
@@ -52,6 +55,9 @@ struct CalendarWorkbenchV5Sidebar: View {
             composerFocused = false
             model.clearTaskSelection()
         }
+        .onChange(of: model.selectedDate) { _, _ in
+            completedExpanded = false
+        }
     }
 
     private var listPane: some View {
@@ -65,61 +71,65 @@ struct CalendarWorkbenchV5Sidebar: View {
 
             VStack(alignment: .leading, spacing: 13) {
                 header
-                if model.listMode == .active { quickComposer }
+                quickComposer
 
-                if model.visibleTasks.isEmpty {
-                    V5QuietEmptyState(isCompleted: model.listMode == .completed)
+                if hasNoVisibleTasks {
+                    V5QuietEmptyState()
                 } else {
                     ScrollView(.vertical,
                                showsIndicators: V5TaskListOverflowPresentation.showsNativeScrollIndicator) {
-                        LazyVStack(spacing: 8) {
-                            ForEach(model.visibleTasks) { task in
-                                V5QuietTaskRow(
-                                    task: task,
-                                    isSelected: model.selectedTaskID == task.id,
-                                    isDragging: draggingTaskID == task.id,
-                                    isDropReveal: revealedTaskID == task.id,
-                                    reduceMotion: reduceMotion,
-                                    onSelect: {
-                                        composerFocused = false
-                                        model.selectTask(id: task.id)
-                                    },
-                                    onEdit: {
-                                        composerFocused = false
-                                        model.beginEditing(task)
-                                    },
-                                    onToggle: {
-                                        composerFocused = false
-                                        withAnimation(rowAnimation) {
-                                            model.setCompletion(
-                                                id: task.id,
-                                                completed: !task.legacy.isCompleted
-                                            )
-                                        }
-                                    },
-                                    onDelete: {
-                                        withAnimation(rowAnimation) { model.permanentlyDeleteCompleted(id: task.id) }
-                                    },
-                                    onHoverChange: { hovering in
-                                        if hovering {
-                                            hoveredTaskID = task.id
-                                        } else if hoveredTaskID == task.id {
-                                            hoveredTaskID = nil
-                                        }
-                                    }
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            if model.shouldShowOverdueSection {
+                                V5TaskSectionHeader(
+                                    title: "逾期",
+                                    count: model.overdueTasks.count,
+                                    symbolName: "exclamationmark.circle.fill",
+                                    tint: .orange
                                 )
-                                .modifier(V5TaskDragModifier(
-                                    task: task,
-                                    onChanged: onTaskDragChanged,
-                                    onEnded: onTaskDragEnded
-                                ))
-                                .transition(rowTransition)
+                                ForEach(model.overdueTasks) { task in
+                                    taskRow(task)
+                                }
+                            }
+
+                            if !model.activeTasks.isEmpty {
+                                V5TaskSectionHeader(
+                                    title: model.isTodaySelected ? "今天的待办" : "待办",
+                                    count: model.activeTasks.count,
+                                    symbolName: "circle",
+                                    tint: .secondary
+                                )
+                                ForEach(model.activeTasks) { task in
+                                    taskRow(task)
+                                }
+                            }
+
+                            if !model.completedTasks.isEmpty {
+                                V5TaskSectionHeader(
+                                    title: model.isTodaySelected ? "今天已完成" : "已完成",
+                                    count: model.completedTasks.count,
+                                    symbolName: "checkmark.circle.fill",
+                                    tint: .secondary
+                                )
+                                ForEach(visibleCompletedTasks) { task in
+                                    taskRow(task)
+                                }
+                                if inlinePresentation.showsCompletedDisclosure {
+                                    Button(inlinePresentation.completedDisclosureTitle) {
+                                        withAnimation(rowAnimation) { completedExpanded.toggle() }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                                    .padding(.top, 2)
+                                    .accessibilityIdentifier("v5-completed-disclosure")
+                                }
                             }
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, V5TaskListOverflowPresentation.contentVerticalInset)
                         .background(V5ScrollViewConfigurator())
-                        .animation(rowAnimation, value: model.visibleTasks.map(\.id))
+                        .animation(rowAnimation, value: visibleTaskIDs)
                     }
                     .scrollIndicators(.hidden)
                     .scrollClipDisabled(V5TaskListOverflowPresentation.disablesScrollClipping)
@@ -141,11 +151,113 @@ struct CalendarWorkbenchV5Sidebar: View {
         }
     }
 
+    private var inlinePresentation: V5InlineTaskSectionsPresentation {
+        V5InlineTaskSectionsPresentation(
+            activeCount: model.activeTasks.count,
+            overdueCount: model.shouldShowOverdueSection ? model.overdueTasks.count : 0,
+            completedCount: model.completedTasks.count,
+            completedExpanded: completedExpanded
+        )
+    }
+
+    private var visibleCompletedTasks: [CalendarWorkbenchV5Task] {
+        Array(model.completedTasks.prefix(inlinePresentation.visibleCompletedCount))
+    }
+
+    private var hasNoVisibleTasks: Bool {
+        !model.shouldShowOverdueSection && model.activeTasks.isEmpty && model.completedTasks.isEmpty
+    }
+
+    private var visibleTaskIDs: [String] {
+        let overdueIDs = model.shouldShowOverdueSection
+            ? model.overdueTasks.map { taskRowIdentity(for: $0) }
+            : []
+        return overdueIDs
+            + model.activeTasks.map { taskRowIdentity(for: $0) }
+            + visibleCompletedTasks.map { taskRowIdentity(for: $0) }
+    }
+
+    private func taskDateText(for task: CalendarWorkbenchV5Task) -> String {
+        task.metadata.dueDate.map { Self.taskDateFormatter.string(from: $0) } ?? "未排期"
+    }
+
+    private func isOverdue(_ task: CalendarWorkbenchV5Task) -> Bool {
+        guard !task.legacy.isCompleted, let dueDate = task.metadata.dueDate else { return false }
+        return model.calendar.startOfDay(for: dueDate) < model.today
+    }
+
+    private func taskRow(_ task: CalendarWorkbenchV5Task) -> some View {
+        V5QuietTaskRow(
+            task: task,
+            dateText: taskDateText(for: task),
+            isOverdue: isOverdue(task),
+            isSelected: model.selectedTaskID == task.id,
+            isLanding: revealedTaskID == task.id,
+            reduceMotion: reduceMotion,
+            onSelect: {
+                composerFocused = false
+                model.selectTask(id: task.id)
+            },
+            onEdit: {
+                composerFocused = false
+                model.beginEditing(task)
+            },
+            onToggle: {
+                composerFocused = false
+                onToggleTask(task)
+            },
+            onDelete: {
+                withAnimation(rowAnimation) { model.permanentlyDeleteCompleted(id: task.id) }
+            },
+            onHoverChange: { hovering in
+                if hovering {
+                    hoveredTaskID = task.id
+                } else if hoveredTaskID == task.id {
+                    hoveredTaskID = nil
+                }
+            }
+        )
+        .modifier(V5TaskDragModifier(
+            task: task,
+            reduceMotion: reduceMotion,
+            onChanged: onTaskDragChanged,
+            onEnded: onTaskDragEnded
+        ))
+        .opacity(completingTaskIDs.contains(task.id) ? 0 : 1)
+        .allowsHitTesting(!taskInteractionLocked)
+        .background {
+            GeometryReader { proxy in
+                let frame = proxy.frame(in: .named("v5-workbench"))
+                Color.clear.preference(
+                    key: V5DragWorkbenchPointsPreferenceKey.self,
+                    value: {
+                        var value = V5DragWorkbenchPoints()
+                        value.taskFrames[task.id] = frame
+                        return value
+                    }()
+                )
+            }
+        }
+        .id(taskRowIdentity(for: task))
+        .transition(rowTransition)
+    }
+
+    private func taskRowIdentity(for task: CalendarWorkbenchV5Task) -> String {
+        V5TaskRowIdentity.value(taskID: task.id, isCompleted: task.legacy.isCompleted)
+    }
+
+    private static let taskDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "M月d日"
+        return formatter
+    }()
+
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.selectionTitle).font(.headline.weight(.semibold))
-                Text(model.listMode == .active ? "这一天的待办" : "这一天已完成的待办")
+                Text(model.isTodaySelected ? "逾期优先 · 今天的待办与已完成" : "这一天的待办与已完成")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -192,11 +304,6 @@ struct CalendarWorkbenchV5Sidebar: View {
     }
 
     private var footer: some View {
-        let presentation = V5FooterPresentation(
-            mode: model.listMode,
-            activeCount: model.activeTasks.count,
-            completedCount: model.completedTasks.count
-        )
         let buildIdentity = AppBuildIdentity.current
         return HStack {
             VStack(alignment: .leading, spacing: 2) {
@@ -209,17 +316,11 @@ struct CalendarWorkbenchV5Sidebar: View {
             }
             .foregroundStyle(.secondary)
             Spacer()
-            Button {
-                model.toggleListMode()
-            } label: {
-                Label(presentation.title, systemImage: presentation.symbolName)
+            Text(inlinePresentation.footerSummary)
                 .font(.caption.weight(.semibold))
-                .frame(width: presentation.controlWidth, height: 32)
-                .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                .foregroundStyle(.secondary)
                 .transaction { $0.animation = nil }
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("v5-completed-toggle")
+                .accessibilityIdentifier("v5-inline-task-summary")
         }
     }
 
@@ -283,17 +384,37 @@ private final class V5ScrollViewConfigurationView: NSView {
     }
 }
 
+private struct V5TaskSectionHeader: View {
+    let title: String
+    let count: Int
+    let symbolName: String
+    let tint: Color
+
+    var body: some View {
+        Label {
+            Text("\(title) \(count)")
+        } icon: {
+            Image(systemName: symbolName)
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(tint)
+        .padding(.top, 3)
+        .padding(.leading, 2)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
 private struct V5QuietEmptyState: View {
-    let isCompleted: Bool
 
     var body: some View {
         VStack(spacing: 8) {
             Spacer()
-            Image(systemName: isCompleted ? "checkmark.circle" : "checklist")
+            Image(systemName: "checklist")
                 .font(.system(size: 22, weight: .regular)).foregroundStyle(.tertiary)
-            Text(isCompleted ? "暂无已完成待办" : "暂无待办")
+            Text("暂无待办")
                 .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-            Text(isCompleted ? "完成的任务会归纳到这里" : "输入一句话，回车即可添加")
+            Text("输入一句话，回车即可添加")
                 .font(.caption).foregroundStyle(.tertiary)
             Spacer()
         }
@@ -303,9 +424,10 @@ private struct V5QuietEmptyState: View {
 
 private struct V5QuietTaskRow: View {
     let task: CalendarWorkbenchV5Task
+    let dateText: String
+    let isOverdue: Bool
     let isSelected: Bool
-    let isDragging: Bool
-    let isDropReveal: Bool
+    let isLanding: Bool
     let reduceMotion: Bool
     let onSelect: () -> Void
     let onEdit: () -> Void
@@ -315,13 +437,13 @@ private struct V5QuietTaskRow: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered = false
-    @State private var isCommittingCompletion = false
 
     private let revealPresentation = V5TaskRowRevealPresentation.value
+    private let selectionPresentation = V5TaskSelectionPresentation.value
 
     var body: some View {
         HStack(spacing: 10) {
-            Button(action: commitCompletion) {
+            Button(action: onToggle) {
                 Image(systemName: task.legacy.isCompleted ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(task.legacy.isCompleted ? Color.accentColor : Color.secondary)
@@ -346,13 +468,22 @@ private struct V5QuietTaskRow: View {
             HStack(spacing: 7) {
                 Button(action: onSelect) {
                     HStack(spacing: 7) {
+                        V5TaskDateBadge(
+                            dateText: dateText,
+                            isOverdue: isOverdue,
+                            colorScheme: colorScheme,
+                            reduceMotion: reduceMotion
+                        )
                         Text(task.legacy.title)
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(task.legacy.isCompleted ? .secondary : .primary)
                             .strikethrough(task.legacy.isCompleted)
                             .lineLimit(1)
-                        if task.metadata.reminderAt != nil {
-                            Image(systemName: "bell.fill").font(.system(size: 10)).foregroundStyle(Color.orange.opacity(0.8))
+                        if let reminder = task.metadata.reminderAt {
+                            Image(systemName: V5TaskReminderPlanner.isSchedulable(reminder) ? "bell.fill" : "bell.slash")
+                                .font(.system(size: 10))
+                                .foregroundStyle(V5TaskReminderPlanner.isSchedulable(reminder)
+                                                 ? Color.orange.opacity(0.8) : Color.secondary)
                         }
                         Spacer()
                     }
@@ -366,27 +497,51 @@ private struct V5QuietTaskRow: View {
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
-        .background(rowFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         .background {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(Color.accentColor.opacity(isDropReveal ? 0.62 : 0.30),
-                        lineWidth: isDropReveal ? 2 : 1)
-                .shadow(color: Color.accentColor.opacity(isDropReveal ? 0.58 : 0.20),
-                        radius: revealPresentation.perimeterGlowRadius)
-                .opacity(isDropReveal || isSelected ? 1 : 0)
-                .allowsHitTesting(false)
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(rowFill)
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Color.accentColor.opacity(0.30),
+                                Color.accentColor.opacity(0.12),
+                                Color.accentColor.opacity(0)
+                            ],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 190
+                        )
+                    )
+                    .scaleEffect(isLanding ? 1.08 : 0.72)
+                    .opacity(isLanding ? 1 : 0)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(isSelected || isDropReveal
-                              ? Color.accentColor.opacity(isDropReveal ? 0.95 : 0.9)
-                              : Color.primary.opacity(isHovered ? 0.11 : 0.06),
-                              lineWidth: isSelected || isDropReveal ? 1.5 : 1)
+                .strokeBorder(
+                    isSelected
+                        ? Color.accentColor.opacity(selectionPresentation.borderOpacity)
+                        : Color.primary.opacity(isHovered ? 0.11 : 0.06),
+                    lineWidth: isSelected ? selectionPresentation.borderWidth : 1
+                )
         }
-        .opacity(isDragging ? 0.18 : 1)
-        .scaleEffect(isDragging ? 0.985 : revealPresentation.cardScale)
+        .shadow(
+            color: Color.accentColor.opacity(
+                isSelected ? selectionPresentation.primaryGlowOpacity : 0
+            ),
+            radius: isSelected ? selectionPresentation.primaryGlowRadius : 0
+        )
+        .shadow(
+            color: Color.accentColor.opacity(
+                isSelected ? selectionPresentation.secondaryGlowOpacity : 0
+            ),
+            radius: isSelected ? selectionPresentation.secondaryGlowRadius : 0
+        )
+        .scaleEffect(revealPresentation.cardScale)
         .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .allowsHitTesting(!isCommittingCompletion)
         .onHover { hovering in
             onHoverChange(hovering)
             withAnimation(.easeOut(duration: 0.1)) { isHovered = hovering }
@@ -394,48 +549,148 @@ private struct V5QuietTaskRow: View {
         .contextMenu {
             if task.legacy.isCompleted {
                 Button("编辑", action: onEdit)
-                Button("标记为未完成", action: commitCompletion)
+                Button("标记为未完成", action: onToggle)
                 Divider()
                 Button("删除", role: .destructive, action: onDelete)
             } else {
                 Button("编辑", action: onEdit)
-                Button("标记为完成", action: commitCompletion)
+                Button("标记为完成", action: onToggle)
             }
         }
         .animation(reduceMotion ? .linear(duration: 0.05) : .easeOut(duration: 0.08), value: isSelected)
-        .animation(reduceMotion ? .easeOut(duration: 0.06) :
-                    .interactiveSpring(response: 0.28, dampingFraction: 0.84),
-                   value: isDragging)
-        .animation(reduceMotion ? .easeOut(duration: 0.08) :
-                    .interactiveSpring(response: 0.32, dampingFraction: 0.80),
-                   value: isDropReveal)
-    }
-
-    private func commitCompletion() {
-        guard !isCommittingCompletion else { return }
-        isCommittingCompletion = true
-        onToggle()
+        .animation(
+            reduceMotion ? .easeOut(duration: 0.10) : .timingCurve(
+                0.16, 0.78, 0.24, 1,
+                duration: revealPresentation.innerBloomDuration
+            ),
+            value: isLanding
+        )
     }
 
     private var rowFill: Color {
-        if isSelected { return Color.accentColor.opacity(colorScheme == .dark ? 0.11 : 0.07) }
+        if isSelected {
+            return Color.accentColor.opacity(
+                colorScheme == .dark
+                    ? selectionPresentation.darkFillOpacity
+                    : selectionPresentation.lightFillOpacity
+            )
+        }
         if isHovered { return Color.primary.opacity(colorScheme == .dark ? 0.075 : 0.045) }
         return Color.white.opacity(colorScheme == .dark ? 0.04 : 0.28)
     }
 }
 
+private struct V5TaskDateBadge: View {
+    let dateText: String
+    let isOverdue: Bool
+    let colorScheme: ColorScheme
+    let reduceMotion: Bool
+
+    var body: some View {
+        ZStack {
+            Capsule()
+                .fill(
+                    (isOverdue ? Color.orange : Color.primary)
+                        .opacity(isOverdue
+                                 ? (colorScheme == .dark ? 0.14 : 0.10)
+                                 : (colorScheme == .dark ? 0.08 : 0.055))
+                )
+            ZStack {
+                Text(dateText)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isOverdue ? Color.orange : Color.secondary)
+                    .id(dateText)
+                    .transition(reduceMotion ? .opacity : .v5DatePageTurn)
+            }
+            .clipped()
+        }
+        .frame(width: 48, height: 20)
+        .contentShape(Capsule())
+        .compositingGroup()
+        .animation(
+            reduceMotion
+                ? .easeOut(duration: V5TaskDateFlipPresentation.reducedMotionDuration)
+                : .timingCurve(0.20, 0.72, 0.24, 1,
+                               duration: V5TaskDateFlipPresentation.duration),
+            value: dateText
+        )
+    }
+}
+
+private struct V5DatePageTurnModifier: AnimatableModifier {
+    var degrees: Double
+    var opacityValue: Double
+    var verticalOffset: CGFloat
+
+    var animatableData: AnimatablePair<Double, AnimatablePair<Double, CGFloat>> {
+        get { AnimatablePair(degrees, AnimatablePair(opacityValue, verticalOffset)) }
+        set {
+            degrees = newValue.first
+            opacityValue = newValue.second.first
+            verticalOffset = newValue.second.second
+        }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .rotation3DEffect(
+                .degrees(degrees),
+                axis: (x: 1, y: 0, z: 0),
+                anchor: degrees < 0 ? .bottom : .top,
+                perspective: V5TaskDateFlipPresentation.perspective
+            )
+            .offset(y: verticalOffset)
+            .opacity(opacityValue)
+    }
+}
+
+private extension AnyTransition {
+    static var v5DatePageTurn: AnyTransition {
+        .asymmetric(
+            insertion: .modifier(
+                active: V5DatePageTurnModifier(
+                    degrees: -V5TaskDateFlipPresentation.tiltDegrees,
+                    opacityValue: 0,
+                    verticalOffset: 2
+                ),
+                identity: V5DatePageTurnModifier(
+                    degrees: 0, opacityValue: 1, verticalOffset: 0
+                )
+            ),
+            removal: .modifier(
+                active: V5DatePageTurnModifier(
+                    degrees: V5TaskDateFlipPresentation.tiltDegrees,
+                    opacityValue: 0,
+                    verticalOffset: -2
+                ),
+                identity: V5DatePageTurnModifier(
+                    degrees: 0, opacityValue: 1, verticalOffset: 0
+                )
+            )
+        )
+    }
+}
+
 private struct V5TaskDragModifier: ViewModifier {
     let task: CalendarWorkbenchV5Task
+    let reduceMotion: Bool
     let onChanged: (CalendarWorkbenchV5Task, CGPoint, CGPoint) -> Void
     let onEnded: (CalendarWorkbenchV5Task, CGPoint) -> Void
 
-    @ViewBuilder
+    @GestureState private var isGestureActive = false
+
     func body(content: Content) -> some View {
-        if task.legacy.isCompleted {
-            content
-        } else {
-            content.simultaneousGesture(
+        content
+            .opacity(isGestureActive ? 0.18 : 1)
+            .scaleEffect(isGestureActive ? 0.985 : 1)
+            .animation(reduceMotion ? .easeOut(duration: 0.06) :
+                        .interactiveSpring(response: 0.28, dampingFraction: 0.84),
+                       value: isGestureActive)
+            .simultaneousGesture(
                 DragGesture(minimumDistance: 8, coordinateSpace: .named("v5-workbench"))
+                    .updating($isGestureActive) { _, isGestureActive, _ in
+                        isGestureActive = true
+                    }
                     .onChanged { value in
                         onChanged(task, value.location, value.startLocation)
                     }
@@ -443,7 +698,6 @@ private struct V5TaskDragModifier: ViewModifier {
                         onEnded(task, value.location)
                     }
             )
-        }
     }
 }
 
@@ -508,11 +762,12 @@ private struct V5FocusedTaskEditor: View {
         self.task = task
         self.model = model
         self.onClose = onClose
-        _title = State(initialValue: task.legacy.title)
-        _details = State(initialValue: task.metadata.details)
-        _date = State(initialValue: task.metadata.dueDate ?? model.selectedDate)
-        _reminderEnabled = State(initialValue: task.metadata.reminderAt != nil)
-        _reminder = State(initialValue: task.metadata.reminderAt ?? model.selectedDate)
+        let draft = model.editDraft(for: task)
+        _title = State(initialValue: draft.title)
+        _details = State(initialValue: draft.details)
+        _date = State(initialValue: draft.date)
+        _reminderEnabled = State(initialValue: draft.reminderEnabled)
+        _reminder = State(initialValue: draft.reminder)
     }
 
     var body: some View {
@@ -548,21 +803,55 @@ private struct V5FocusedTaskEditor: View {
                 if reminderEnabled {
                     DatePicker("提醒时间", selection: $reminder, displayedComponents: .hourAndMinute)
                         .datePickerStyle(.field).frame(maxWidth: 230, alignment: .leading)
+                    if reminderIsInvalid {
+                        Text("提醒时间必须晚于现在")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
             }
 
             Spacer()
 
             HStack {
-                Button("取消") { model.endEditing() }.buttonStyle(.bordered)
+                Button("取消") { model.discardEditDraft(for: task.id) }.buttonStyle(.bordered)
                 Spacer()
                 Button("保存") {
-                    model.update(id: task.id, title: title, details: details, date: date,
-                                 reminderEnabled: reminderEnabled, reminder: combinedReminder)
+                    model.update(
+                        id: task.id,
+                        title: title,
+                        details: details,
+                        date: date,
+                        reminderEnabled: reminderEnabled,
+                        reminder: combinedReminder
+                    )
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || reminderIsInvalid)
             }
+        }
+        .onChange(of: title) { _, _ in persistDraft() }
+        .onChange(of: details) { _, _ in persistDraft() }
+        .onChange(of: date) { _, newDate in
+            if reminderEnabled {
+                let time = model.calendar.dateComponents([.hour, .minute], from: reminder)
+                reminder = model.calendar.date(
+                    bySettingHour: time.hour ?? 9,
+                    minute: time.minute ?? 0,
+                    second: 0,
+                    of: newDate
+                ) ?? reminder
+            }
+            persistDraft()
+        }
+        .onChange(of: reminderEnabled) { _, enabled in
+            if enabled && !V5TaskReminderPlanner.isSchedulable(combinedReminder) {
+                reminder = V5TaskReminderPlanner.defaultReminder(forDueDate: date)
+            }
+            persistDraft()
+        }
+        .onChange(of: reminder) { _, _ in
+            persistDraft()
         }
     }
 
@@ -578,6 +867,23 @@ private struct V5FocusedTaskEditor: View {
     private var combinedReminder: Date {
         let time = model.calendar.dateComponents([.hour, .minute], from: reminder)
         return model.calendar.date(bySettingHour: time.hour ?? 9, minute: time.minute ?? 0, second: 0, of: date) ?? date
+    }
+
+    private var reminderIsInvalid: Bool {
+        reminderEnabled && !V5TaskReminderPlanner.isSchedulable(combinedReminder)
+    }
+
+    private func persistDraft() {
+        model.storeEditDraft(
+            V5TaskEditDraft(
+                title: title,
+                details: details,
+                date: date,
+                reminderEnabled: reminderEnabled,
+                reminder: reminder
+            ),
+            for: task.id
+        )
     }
 }
 

@@ -116,6 +116,34 @@ struct V5FooterPresentation {
     }
 }
 
+struct V5InlineTaskSectionsPresentation {
+    static let collapsedCompletedLimit = 3
+
+    let activeCount: Int
+    let overdueCount: Int
+    let completedCount: Int
+    let completedExpanded: Bool
+
+    var visibleCompletedCount: Int {
+        completedExpanded ? completedCount : min(completedCount, Self.collapsedCompletedLimit)
+    }
+
+    var showsCompletedDisclosure: Bool {
+        completedCount > Self.collapsedCompletedLimit
+    }
+
+    var completedDisclosureTitle: String {
+        completedExpanded ? "收起" : "查看全部 \(completedCount)"
+    }
+
+    var footerSummary: String {
+        guard overdueCount > 0 else {
+            return "待办 \(activeCount) · 已完成 \(completedCount)"
+        }
+        return "今天 \(activeCount) · 逾期 \(overdueCount) · 已完成 \(completedCount)"
+    }
+}
+
 enum V5TaskListOverflowPresentation {
     static let disablesScrollClipping = false
     static let showsNativeScrollIndicator = false
@@ -136,12 +164,56 @@ struct V5TaskRowRevealPresentation {
     let cardScale: CGFloat
     let showsInsetStroke: Bool
     let perimeterGlowRadius: CGFloat
+    let innerBloomDuration: Double
+    let landingOutlineDuration: Double
+    let landingOutlineOutset: CGFloat
+    let landingOutlineCornerRadius: CGFloat
 
     static let value = V5TaskRowRevealPresentation(
         cardScale: 1,
         showsInsetStroke: false,
-        perimeterGlowRadius: 5
+        perimeterGlowRadius: 5,
+        innerBloomDuration: 0.36,
+        landingOutlineDuration: 0.28,
+        landingOutlineOutset: 2,
+        landingOutlineCornerRadius: 13
     )
+}
+
+struct V5TaskSelectionPresentation {
+    let darkFillOpacity: Double
+    let lightFillOpacity: Double
+    let borderOpacity: Double
+    let borderWidth: CGFloat
+    let primaryGlowOpacity: Double
+    let primaryGlowRadius: CGFloat
+    let secondaryGlowOpacity: Double
+    let secondaryGlowRadius: CGFloat
+
+    static let value = V5TaskSelectionPresentation(
+        darkFillOpacity: 0.11,
+        lightFillOpacity: 0.07,
+        borderOpacity: 0.9,
+        borderWidth: 1.5,
+        primaryGlowOpacity: 0.18,
+        primaryGlowRadius: 7,
+        secondaryGlowOpacity: 0.08,
+        secondaryGlowRadius: 12
+    )
+}
+
+enum V5TaskRowIdentity {
+    static func value(taskID: UUID, isCompleted: Bool) -> String {
+        "\(taskID.uuidString)-\(isCompleted ? "completed" : "active")"
+    }
+}
+
+enum V5TaskDateFlipPresentation {
+    static let duration = 0.48
+    static let reducedMotionDuration = 0.10
+    static let cardScale: CGFloat = 1
+    static let tiltDegrees = 78.0
+    static let perspective: CGFloat = 0.58
 }
 
 struct V5SelectionGlowPresentation {
@@ -225,6 +297,12 @@ enum V5TaskDropGeometry {
 
 }
 
+enum V5TaskDropCommitPolicy {
+    /// Only the pointer's actual release location may commit. A previously
+    /// hovered legal day cannot be reused after the pointer leaves it.
+    static func resolvedTarget(atRelease candidate: Date?) -> Date? { candidate }
+}
+
 enum V5TaskDragAnchorGeometry {
     /// Source circles, drag locations and day indicators are all measured in
     /// the named workbench coordinate space. The rendered frame center is the
@@ -263,6 +341,110 @@ enum V5TaskDropAnimationTiming {
     static let modelCommitDelay = absorbDuration
 }
 
+enum V5TaskCompletionFlightPhase: Equatable {
+    case card
+    case orb
+    case arrived
+}
+
+struct V5TaskCompletionFlightGeometry: Equatable {
+    let cardCenter: CGPoint
+    let cardScale: CGFloat
+    let cardOpacity: Double
+    let ringCenter: CGPoint
+    let ringDiameter: CGFloat
+    let ringOpacity: Double
+
+    static func value(for phase: V5TaskCompletionFlightPhase,
+                      sourceFrame: CGRect, sourceRing: CGPoint,
+                      target: CGPoint) -> Self {
+        let cardCenter = CGPoint(x: sourceFrame.midX, y: sourceFrame.midY)
+        switch phase {
+        case .card:
+            return Self(cardCenter: cardCenter, cardScale: 1, cardOpacity: 1,
+                        ringCenter: sourceRing, ringDiameter: 20, ringOpacity: 0)
+        case .orb:
+            return Self(cardCenter: cardCenter, cardScale: 0.08, cardOpacity: 0,
+                        ringCenter: sourceRing, ringDiameter: 14, ringOpacity: 1)
+        case .arrived:
+            return Self(cardCenter: cardCenter, cardScale: 0.08, cardOpacity: 0,
+                        ringCenter: target, ringDiameter: 7, ringOpacity: 1)
+        }
+    }
+}
+
+enum V5TaskCompletionAccent: Equatable {
+    case overdue
+    case standard
+
+    static func resolve(isOverdue: Bool) -> Self {
+        isOverdue ? .overdue : .standard
+    }
+}
+
+enum V5TaskCompletionTransition: Equatable {
+    case inline
+    case returnToDueDate
+
+    static func resolve(dueDate: Date?, selectedDate: Date,
+                        today: Date, calendar: Calendar) -> Self {
+        guard let dueDate else { return .inline }
+        let dueDay = calendar.startOfDay(for: dueDate)
+        let selectedDay = calendar.startOfDay(for: selectedDate)
+        let todayDay = calendar.startOfDay(for: today)
+
+        // Flight communicates that today's overdue overview is returning work
+        // to a different historical home. A task already viewed on its own day
+        // has no spatial journey to make.
+        guard dueDay < todayDay,
+              selectedDay == todayDay,
+              dueDay != selectedDay else { return .inline }
+        return .returnToDueDate
+    }
+}
+
+enum V5TaskCompletionFlightTiming {
+    static let collapseDuration = 0.18
+    static let travelDuration = 0.42
+    static let modelCommitDelay = collapseDuration + travelDuration
+    static let reducedMotionCommitDelay = 0.10
+}
+
+enum V5TaskCompletionAdmission {
+    static func canBegin(hasActiveFlight: Bool, hasPendingTarget: Bool) -> Bool {
+        !hasActiveFlight && !hasPendingTarget
+    }
+}
+
+/// The completion mutation belongs to the arrival event, never to an unrelated
+/// navigation, focus, or window-lifecycle interruption.
+struct V5TaskCompletionLifecycle {
+    private var tasksBySession: [UUID: UUID] = [:]
+
+    mutating func begin(sessionID: UUID, taskID: UUID) {
+        tasksBySession[sessionID] = taskID
+    }
+
+    mutating func arrive(sessionID: UUID) -> UUID? {
+        tasksBySession.removeValue(forKey: sessionID)
+    }
+
+    mutating func navigate() -> [UUID] {
+        tasksBySession.removeAll()
+        return []
+    }
+
+    mutating func calendarChanged() -> [UUID] {
+        tasksBySession.removeAll()
+        return []
+    }
+
+    mutating func cancelAll() -> [UUID] {
+        tasksBySession.removeAll()
+        return []
+    }
+}
+
 struct V5DayTaskCounts: Equatable {
     let active: Int
     let completed: Int
@@ -299,6 +481,20 @@ struct V5DayIndicatorLayout: Equatable {
         return V5DayIndicatorLayout(
             countText: countText,
             countFontSize: total >= 10 ? 8 : 9
+        )
+    }
+}
+
+struct V5DayIndicatorArrivalPresentation: Equatable {
+    let markerScale: CGFloat
+    let glowRadius: CGFloat
+    let glowOpacity: Double
+
+    static func value(isArriving: Bool) -> Self {
+        Self(
+            markerScale: 1,
+            glowRadius: isArriving ? 6 : 0,
+            glowOpacity: isArriving ? 0.68 : 0
         )
     }
 }

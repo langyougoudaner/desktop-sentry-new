@@ -6,7 +6,7 @@ Desktop Sentry is a local-first macOS menu-bar app for calendars, todos, reusabl
 prompts, and local AI Skill indexes. It is written in Swift and SwiftUI and does not
 require an Xcode project.
 
-Current source release: **2.0.3 build 23**.
+Current source release: **2.0.4 build 24**.
 
 The app displays its exact version, build number, and calendar generation in Settings
 and in the calendar footer. Source builds additionally display their Git revision and
@@ -18,6 +18,7 @@ This section lists what the app currently does.
 
 - Native macOS menu-bar prompt and calendar entries
 - Calendar and daily todo workbench with drag-to-date scheduling
+- Overdue tasks surfaced on today's page and recent completions shown inline by day
 - Local task descriptions, optional reminders, completion, restore, and deletion
 - Reusable prompts and configurable quick-menu entries
 - Local `SKILL.md` discovery, search, categories, and favorites

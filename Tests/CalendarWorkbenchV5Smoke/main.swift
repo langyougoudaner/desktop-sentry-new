@@ -13,7 +13,10 @@ struct CalendarWorkbenchV5Smoke {
         let detail = V5TaskMetadata(dueDate: calendar.startOfDay(for: now), details: "V5 扩展字段", reminderAt: nil)
         let model = CalendarWorkbenchV5Model(now: now, tasks: [legacy], metadata: [legacyID: detail])
         precondition(!model.isPreviewData)
-        precondition(CalendarWorkbenchV5Model(now: now).isPreviewData)
+        let previewModel = CalendarWorkbenchV5Model(now: now)
+        precondition(previewModel.isPreviewData)
+        precondition(previewModel.shouldShowOverdueSection,
+                     "the isolated preview must visibly demonstrate the overdue section")
 
         let nextDay = calendar.date(byAdding: .day, value: 1, to: now)!
         let residentModel = CalendarWorkbenchV5Model(now: now, tasks: [], metadata: [:])
@@ -69,6 +72,16 @@ struct CalendarWorkbenchV5Smoke {
                      "a successful drop must reveal the task on its target date")
         precondition(dragMutationCount == 1, "a successful drop must persist exactly once")
 
+        let completedDropDate = calendar.date(byAdding: .day, value: 4, to: now)!
+        dragModel.moveTask(id: completedID, to: completedDropDate)
+        precondition(dragModel.task(id: completedID)?.legacy.isCompleted == true,
+                     "moving a completed task must preserve its completion state")
+        precondition(dragModel.task(id: completedID)?.metadata.dueDate.map {
+            dragModel.calendar.isDate($0, inSameDayAs: completedDropDate)
+        } == true, "a completed task must remain draggable to another date")
+        precondition(dragMutationCount == 2,
+                     "moving a completed task must persist exactly once")
+
         let completionID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
         let completionTask = TaskItem(id: completionID, title: "快速连点测试")
         let completionModel = CalendarWorkbenchV5Model(
@@ -84,6 +97,51 @@ struct CalendarWorkbenchV5Smoke {
                      "repeated completion input must never restore a departing row")
         precondition(completionMutationCount == 1,
                      "repeated completion input must persist exactly once")
+
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now)!
+        let overdueID = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
+        let finishedYesterdayID = UUID(uuidString: "00000000-0000-0000-0000-000000000013")!
+        let todayID = UUID(uuidString: "00000000-0000-0000-0000-000000000014")!
+        let overdueTask = TaskItem(id: overdueID, title: "昨天未完成")
+        let finishedYesterdayTask = TaskItem(
+            id: finishedYesterdayID,
+            title: "昨天已完成",
+            isCompleted: true
+        )
+        let todayTask = TaskItem(id: todayID, title: "今天待办")
+        let overviewModel = CalendarWorkbenchV5Model(
+            now: now,
+            tasks: [overdueTask, finishedYesterdayTask, todayTask],
+            metadata: [
+                overdueID: V5TaskMetadata(dueDate: calendar.startOfDay(for: yesterday)),
+                finishedYesterdayID: V5TaskMetadata(dueDate: calendar.startOfDay(for: yesterday)),
+                todayID: V5TaskMetadata(dueDate: calendar.startOfDay(for: now))
+            ]
+        )
+        precondition(overviewModel.shouldShowOverdueSection,
+                     "today must surface unfinished work from earlier dates")
+        precondition(overviewModel.overdueTasks.map(\.id) == [overdueID],
+                     "overdue excludes completed work and keeps the original due date")
+        precondition(overviewModel.activeTasks.map(\.id) == [todayID],
+                     "today's normal section must not duplicate overdue work")
+        overviewModel.setCompletion(id: overdueID, completed: true, at: now)
+        precondition(!overviewModel.completedTasks.contains(where: { $0.id == overdueID }),
+                     "completion time must not move an overdue task into today's assigned work")
+        precondition(overviewModel.task(id: overdueID)?.metadata.dueDate.map {
+            calendar.isDate($0, inSameDayAs: yesterday)
+        } == true, "completion must preserve the task's original due date")
+        precondition(overviewModel.task(id: overdueID)?.metadata.completedAt == now)
+        overviewModel.select(yesterday)
+        precondition(Set(overviewModel.completedTasks.map(\.id)) == Set([overdueID, finishedYesterdayID]),
+                     "completed work remains on its assigned date")
+        overviewModel.select(now)
+        overviewModel.setCompletion(id: overdueID, completed: false, at: now)
+        precondition(overviewModel.task(id: overdueID)?.metadata.completedAt == nil,
+                     "restoring a task must clear its completion timestamp")
+        precondition(overviewModel.overdueTasks.map(\.id) == [overdueID])
+        overviewModel.select(yesterday)
+        precondition(!overviewModel.shouldShowOverdueSection,
+                     "a historical date must not duplicate its tasks in an overdue section")
 
         let migrated = V5TaskMetadataMigration.merge(
             tasks: [legacy],
@@ -136,7 +194,7 @@ struct CalendarWorkbenchV5Smoke {
         let tomorrow = model.calendar.date(byAdding: .day, value: 1, to: now)!
         let reminder = model.calendar.date(bySettingHour: 9, minute: 30, second: 0, of: tomorrow)!
         model.update(id: newID, title: "已编辑任务", details: "日期和说明已修改", date: tomorrow,
-                     reminderEnabled: true, reminder: reminder)
+                     reminderEnabled: true, reminder: reminder, now: now)
         precondition(model.tasks[0].legacy.title == "已编辑任务")
         precondition(model.tasks[0].metadata.reminderAt == reminder)
 
@@ -162,6 +220,7 @@ struct CalendarWorkbenchV5Smoke {
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("DesktopSentryV5Smoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
         let store = V5TaskMetadataStore(fileURL: directory.appendingPathComponent("metadata.json"))
         try store.save(model.metadataSnapshot())
         let roundTrip = try store.load()
@@ -181,6 +240,6 @@ struct CalendarWorkbenchV5Smoke {
                      "corrupt V5 metadata must be copied before a clean companion file can replace it")
 
         print("V5 smoke passed: identity, date linkage, add/edit, optional reminder, complete/recover, completed-only permanent delete, metadata round-trip")
-        print("Isolated metadata fixture: \(store.fileURL.path)")
+        print("Isolated metadata fixture cleaned")
     }
 }

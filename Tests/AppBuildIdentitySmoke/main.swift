@@ -11,15 +11,15 @@ struct AppBuildIdentitySmoke {
         precondition(release.compactLabel == "2.0.2 (22) · V5")
 
         let tracedRelease = AppBuildIdentity(infoDictionary: [
-            "CFBundleShortVersionString": "2.0.3",
-            "CFBundleVersion": "23",
+            "CFBundleShortVersionString": "2.0.4",
+            "CFBundleVersion": "24",
             "DesktopSentryWorkbenchGeneration": "V5",
             "DesktopSentrySourceRevision": "30efa05",
             "DesktopSentrySourceDirty": true,
             "DesktopSentryBuildChannel": "release"
         ])
-        precondition(tracedRelease.displayLabel == "2.0.3 (23) · 日历 V5")
-        precondition(tracedRelease.compactLabel == "2.0.3 (23) · V5")
+        precondition(tracedRelease.displayLabel == "2.0.4 (24) · 日历 V5")
+        precondition(tracedRelease.compactLabel == "2.0.4 (24) · V5")
 
         let preview = AppBuildIdentity(infoDictionary: [
             "CFBundleShortVersionString": "2.0.2",

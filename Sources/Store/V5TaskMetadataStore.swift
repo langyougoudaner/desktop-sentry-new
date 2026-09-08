@@ -53,10 +53,19 @@ enum V5TaskMetadataMigration {
     /// their UUIDs or any field in the legacy AppData envelope.
     static func merge(tasks: [TaskItem], existing: [UUID: V5TaskMetadata],
                       defaultDate: Date, calendar: Calendar) -> [UUID: V5TaskMetadata] {
-        var result = existing
+        let currentTaskIDs = Set(tasks.map(\.id))
+        var result = existing.filter { currentTaskIDs.contains($0.key) }
         let migrationDay = calendar.startOfDay(for: defaultDate)
-        for task in tasks where result[task.id] == nil {
-            result[task.id] = V5TaskMetadata(dueDate: migrationDay)
+        for task in tasks {
+            if result[task.id] == nil {
+                result[task.id] = V5TaskMetadata(dueDate: migrationDay)
+            }
+            if result[task.id]?.dueDate == nil {
+                result[task.id]?.dueDate = migrationDay
+            }
+            if !task.isCompleted {
+                result[task.id]?.completedAt = nil
+            }
         }
         return result
     }

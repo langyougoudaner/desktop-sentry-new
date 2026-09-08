@@ -41,6 +41,26 @@ struct V5WorkbenchPresentationSmoke {
                      "footer capsule width must stay stable while modes switch")
         precondition(active.controlWidth >= 104)
 
+        let collapsedSections = V5InlineTaskSectionsPresentation(
+            activeCount: 2,
+            overdueCount: 4,
+            completedCount: 5,
+            completedExpanded: false
+        )
+        precondition(collapsedSections.visibleCompletedCount == 3,
+                     "the default list keeps completed work visible without flooding the sidebar")
+        precondition(collapsedSections.completedDisclosureTitle == "查看全部 5")
+        precondition(collapsedSections.footerSummary == "今天 2 · 逾期 4 · 已完成 5")
+        let expandedSections = V5InlineTaskSectionsPresentation(
+            activeCount: 2,
+            overdueCount: 0,
+            completedCount: 5,
+            completedExpanded: true
+        )
+        precondition(expandedSections.visibleCompletedCount == 5)
+        precondition(expandedSections.completedDisclosureTitle == "收起")
+        precondition(expandedSections.footerSummary == "待办 2 · 已完成 5")
+
         let selectedGlow = V5SelectionGlowPresentation.selected
         let dropGlow = V5SelectionGlowPresentation.dropTarget
         precondition(selectedGlow.outerRadius <= 14,
@@ -114,6 +134,105 @@ struct V5WorkbenchPresentationSmoke {
         precondition(!V5TaskDragPresentation.returning.showsTitle,
                      "a cancelled drop must stay the same ring instead of turning into a task capsule")
 
+        let completionSource = CGRect(x: 700, y: 250, width: 360, height: 52)
+        let completionSourceRing = CGPoint(x: 722, y: 276)
+        let completionTarget = CGPoint(x: 176, y: 410)
+        let completionCard = V5TaskCompletionFlightGeometry.value(
+            for: .card, sourceFrame: completionSource,
+            sourceRing: completionSourceRing, target: completionTarget
+        )
+        precondition(completionCard.cardCenter == CGPoint(x: 880, y: 276))
+        precondition(completionCard.cardScale == 1 && completionCard.cardOpacity == 1,
+                     "completion must begin from the complete rendered card")
+        let completionOrb = V5TaskCompletionFlightGeometry.value(
+            for: .orb, sourceFrame: completionSource,
+            sourceRing: completionSourceRing, target: completionTarget
+        )
+        precondition(completionOrb.ringCenter == completionSourceRing,
+                     "the ring must be born at the card's own completion circle, never its center")
+        precondition(completionOrb.cardOpacity == 0)
+        precondition(completionOrb.ringDiameter == 14 && completionOrb.ringOpacity == 1,
+                     "the rectangular card must hand off to a real circle before travel")
+        let completionArrival = V5TaskCompletionFlightGeometry.value(
+            for: .arrived, sourceFrame: completionSource,
+            sourceRing: completionSourceRing, target: completionTarget
+        )
+        precondition(completionArrival.ringCenter == completionTarget)
+        precondition(completionArrival.ringDiameter == 7,
+                     "the final frame must exactly match the calendar indicator")
+        precondition(V5TaskCompletionFlightTiming.modelCommitDelay ==
+                     V5TaskCompletionFlightTiming.collapseDuration +
+                     V5TaskCompletionFlightTiming.travelDuration,
+                     "arrival and model completion must be one event with no second stop")
+        precondition(V5TaskCompletionFlightTiming.reducedMotionCommitDelay <
+                     V5TaskCompletionFlightTiming.modelCommitDelay)
+        precondition(V5TaskCompletionAccent.resolve(isOverdue: true) == .overdue)
+        precondition(V5TaskCompletionAccent.resolve(isOverdue: false) == .standard)
+
+        var completionCalendar = Calendar(identifier: .gregorian)
+        completionCalendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let completionToday = completionCalendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 7, hour: 12
+        ))!
+        let completionYesterday = completionCalendar.date(
+            byAdding: .day, value: -1, to: completionToday
+        )!
+        let completionTomorrow = completionCalendar.date(
+            byAdding: .day, value: 1, to: completionToday
+        )!
+        precondition(V5TaskCompletionTransition.resolve(
+            dueDate: completionToday, selectedDate: completionToday,
+            today: completionToday, calendar: completionCalendar
+        ) == .inline, "a task already on today's page must complete in place")
+        precondition(V5TaskCompletionTransition.resolve(
+            dueDate: completionYesterday, selectedDate: completionYesterday,
+            today: completionToday, calendar: completionCalendar
+        ) == .inline, "a task viewed on its own historical date is already home")
+        precondition(V5TaskCompletionTransition.resolve(
+            dueDate: completionYesterday, selectedDate: completionToday,
+            today: completionToday, calendar: completionCalendar
+        ) == .returnToDueDate,
+        "only an overdue task surfaced away from its due date should fly home")
+        precondition(V5TaskCompletionTransition.resolve(
+            dueDate: completionTomorrow, selectedDate: completionToday,
+            today: completionToday, calendar: completionCalendar
+        ) == .inline, "a defensive future-date mismatch must not imply overdue return")
+
+        let arrivalFeedback = V5DayIndicatorArrivalPresentation.value(isArriving: true)
+        precondition(arrivalFeedback.markerScale == 1,
+                     "arrival feedback must never enlarge or displace the real day marker")
+        precondition(arrivalFeedback.glowRadius > 0,
+                     "arrival may acknowledge completion with a stationary glow")
+        precondition(V5TaskCompletionAdmission.canBegin(
+            hasActiveFlight: false, hasPendingTarget: false
+        ))
+        precondition(!V5TaskCompletionAdmission.canBegin(
+            hasActiveFlight: true, hasPendingTarget: false
+        ), "a second action must not reuse coordinates while a flight is active")
+        precondition(!V5TaskCompletionAdmission.canBegin(
+            hasActiveFlight: false, hasPendingTarget: true
+        ), "a second action must not replace an unresolved cross-month target")
+
+        let completionTask = UUID()
+        let completionSession = UUID()
+        var lifecycle = V5TaskCompletionLifecycle()
+        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
+        precondition(lifecycle.navigate() == [],
+                     "changing the selected date must never commit a flight early")
+        precondition(lifecycle.arrive(sessionID: completionSession) == nil,
+                     "navigation must cancel stale flight coordinates")
+        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
+        precondition(lifecycle.calendarChanged() == [],
+                     "changing the visible month must cancel stale geometry without committing")
+        precondition(lifecycle.arrive(sessionID: completionSession) == nil,
+                     "a cancelled flight must not commit at its old coordinate")
+        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
+        precondition(lifecycle.arrive(sessionID: completionSession) == completionTask,
+                     "completion may commit only when its own flight arrives")
+        lifecycle.begin(sessionID: UUID(), taskID: UUID())
+        precondition(lifecycle.cancelAll().isEmpty,
+                     "closing the preview cancels unfinished flights without changing task data")
+
         precondition(!V5TaskListOverflowPresentation.disablesScrollClipping,
                      "task rows must never render across the composer or footer")
         precondition(!V5TaskListOverflowPresentation.showsNativeScrollIndicator,
@@ -138,6 +257,41 @@ struct V5WorkbenchPresentationSmoke {
                      "drop feedback must not draw a second blue frame inside the card")
         precondition(rowReveal.perimeterGlowRadius > 0,
                      "drop feedback must retain a soft glow at the card perimeter")
+        precondition(rowReveal.innerBloomDuration > 0)
+        precondition(rowReveal.landingOutlineOutset == 2,
+                     "the landing outline may sit only two points beyond the original card")
+        precondition(rowReveal.landingOutlineCornerRadius == 13,
+                     "the expanded outline must keep its curve parallel to the 11-point card")
+        precondition(rowReveal.landingOutlineDuration > 0,
+                     "the fixed landing outline should still fade smoothly")
+
+        let selection = V5TaskSelectionPresentation.value
+        precondition(selection.darkFillOpacity == 0.11)
+        precondition(selection.lightFillOpacity == 0.07)
+        precondition(selection.borderOpacity == 0.9)
+        precondition(selection.borderWidth == 1.5)
+        precondition(selection.primaryGlowRadius == 7)
+        precondition(selection.secondaryGlowRadius == 12)
+
+        let stableTaskID = UUID()
+        let activeRowIdentity = V5TaskRowIdentity.value(
+            taskID: stableTaskID, isCompleted: false
+        )
+        precondition(activeRowIdentity == V5TaskRowIdentity.value(
+            taskID: stableTaskID, isCompleted: false
+        ), "changing only the due date must not recreate the whole task card")
+        precondition(activeRowIdentity != V5TaskRowIdentity.value(
+            taskID: stableTaskID, isCompleted: true
+        ), "completion may still move the task between active and completed sections")
+        precondition(V5TaskDateFlipPresentation.duration >= 0.45,
+                     "the date-only page turn must be slow enough to read")
+        precondition(V5TaskDateFlipPresentation.duration <= 0.60,
+                     "the date-only page turn must remain responsive")
+        precondition(V5TaskDateFlipPresentation.cardScale == 1,
+                     "date changes must never flip or scale the containing task card")
+        precondition(V5TaskDateFlipPresentation.reducedMotionDuration <
+                     V5TaskDateFlipPresentation.duration,
+                     "reduced motion must replace the page turn with a short cross-fade")
 
         precondition(V5DayTaskIndicatorStyle.resolve(activeCount: 0, completedCount: 0) == .none)
         precondition(V5DayTaskIndicatorStyle.resolve(activeCount: 2, completedCount: 3) == .activeRing,

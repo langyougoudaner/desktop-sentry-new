@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.4 build 24 — overdue workflow and stable calendar interactions
+
+- Surfaced overdue tasks on today's page and recent completed tasks inline on each day.
+- Kept task identity and due dates stable across repeated moves, including moves back into the past.
+- Made past-date moves immediately overdue while preserving reminders and completion ownership.
+- Limited return-to-date completion flights to overdue tasks shown away from their historical date.
+- Replaced whole-card date flips with a slower date-badge-only page turn.
+- Restored the V5 deep-blue card selection treatment and reduced landing glow to a fixed two-point perimeter.
+- Added focused state-machine, date-movement, reminder, interaction, persistence, and presentation checks.
+
 ## 2.0.3 build 23 — aligned task list and perimeter-only drop glow
 
 - Removed the native task-list scroller and its reserved right-side gutter.

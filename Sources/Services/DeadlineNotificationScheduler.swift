@@ -8,6 +8,7 @@ final class DeadlineNotificationScheduler: NSObject, UNUserNotificationCenterDel
     private let center = UNUserNotificationCenter.current()
     private(set) var authorizationStatus: UNAuthorizationStatus = .notDetermined
     var onOpenDeadline: ((UUID) -> Void)?
+    var onOpenTask: ((UUID) -> Void)?
 
     override init() {
         super.init()
@@ -95,6 +96,13 @@ final class DeadlineNotificationScheduler: NSObject, UNUserNotificationCenterDel
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
+        let taskID = (response.notification.request.content.userInfo["taskID"] as? String)
+            .flatMap(UUID.init(uuidString:))
+        if let taskID {
+            DispatchQueue.main.async { [weak self] in self?.onOpenTask?(taskID) }
+            completionHandler()
+            return
+        }
         let id = (response.notification.request.content.userInfo["deadlineID"] as? String)
             .flatMap(UUID.init(uuidString:))
         if let id { DispatchQueue.main.async { [weak self] in self?.onOpenDeadline?(id) } }

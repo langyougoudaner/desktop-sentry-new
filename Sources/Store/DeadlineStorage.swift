@@ -7,6 +7,7 @@ final class DeadlineStorage {
 
     private let fileURL: URL
     private let ioQueue = DispatchQueue(label: "com.desktopsentry.deadlines-io", qos: .utility)
+    private let ioQueueKey = DispatchSpecificKey<Void>()
     private let writeLock = NSLock()
 
     init(fileURL: URL? = nil) {
@@ -19,6 +20,7 @@ final class DeadlineStorage {
                 .appendingPathComponent("DesktopSentry", isDirectory: true)
                 .appendingPathComponent("deadlines.json")
         }
+        ioQueue.setSpecific(key: ioQueueKey, value: ())
         ensureDirectory()
     }
 
@@ -34,6 +36,15 @@ final class DeadlineStorage {
 
     func save(_ deadlines: [DeadlineItem]) {
         ioQueue.async { [weak self] in self?.writeAtomic(deadlines) }
+    }
+
+    /// Drains earlier queued writes and returns only after this snapshot is durable.
+    func saveAndWait(_ deadlines: [DeadlineItem]) {
+        if DispatchQueue.getSpecific(key: ioQueueKey) != nil {
+            writeAtomic(deadlines)
+        } else {
+            ioQueue.sync { writeAtomic(deadlines) }
+        }
     }
 
     private func ensureDirectory() {

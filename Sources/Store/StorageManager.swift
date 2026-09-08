@@ -13,12 +13,14 @@ final class StorageManager {
     // MARK: - Private state
 
     private let ioQueue = DispatchQueue(label: "com.desktopsentry.io", qos: .utility)
+    private let ioQueueKey = DispatchSpecificKey<Void>()
     private let writeLock = NSLock()   // guards the actual write critical section
+    private let dataURL: URL
 
     // MARK: - Path
 
     /// `~/Library/Application Support/DesktopSentry/data.json`
-    private var dataURL: URL {
+    private static func defaultDataURL() -> URL {
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!   // .applicationSupportDirectory is always present on macOS
@@ -44,7 +46,9 @@ final class StorageManager {
 
     // MARK: - Init
 
-    private init() {
+    init(fileURL: URL? = nil) {
+        self.dataURL = fileURL ?? Self.defaultDataURL()
+        ioQueue.setSpecific(key: ioQueueKey, value: ())
         ensureDirectory()
     }
 
@@ -91,6 +95,16 @@ final class StorageManager {
     func save(_ appData: AppData) {
         ioQueue.async { [weak self] in
             self?.writeAtomic(appData)
+        }
+    }
+
+    /// Drains earlier queued writes and returns only after this snapshot is durable.
+    /// Used at lifecycle boundaries where fire-and-forget persistence is unsafe.
+    func saveAndWait(_ appData: AppData) {
+        if DispatchQueue.getSpecific(key: ioQueueKey) != nil {
+            writeAtomic(appData)
+        } else {
+            ioQueue.sync { writeAtomic(appData) }
         }
     }
 
