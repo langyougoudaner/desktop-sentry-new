@@ -128,9 +128,9 @@ struct V5WorkbenchPresentationSmoke {
         precondition(V5TaskDragPresentation.absorbing.scale == 1)
         precondition(V5TaskDragPresentation.absorbing.opacity == 1,
                      "the landing orb must be visually identical to the real calendar marker")
-        precondition(V5TaskDropAnimationTiming.absorbDuration ==
-                     V5TaskDropAnimationTiming.modelCommitDelay,
-                     "the real marker must replace the drag orb on the landing frame")
+        precondition(V5TaskDropAnimationTiming.modelCommitDelay <
+                     V5TaskDropAnimationTiming.absorbDuration,
+                     "the date must commit before the independent drag orb finishes absorbing")
         precondition(!V5TaskDragPresentation.returning.showsTitle,
                      "a cancelled drop must stay the same ring instead of turning into a task capsule")
 
@@ -141,33 +141,63 @@ struct V5WorkbenchPresentationSmoke {
             for: .card, sourceFrame: completionSource,
             sourceRing: completionSourceRing, target: completionTarget
         )
-        precondition(completionCard.cardCenter == CGPoint(x: 880, y: 276))
-        precondition(completionCard.cardScale == 1 && completionCard.cardOpacity == 1,
-                     "completion must begin from the complete rendered card")
+        precondition(completionCard.shellCenter == CGPoint(x: 880, y: 276))
+        precondition(completionCard.shellSize == completionSource.size)
+        precondition(completionCard.shellCornerRadius == 11)
+        precondition(completionCard.contentScale == 1 && completionCard.contentOpacity == 1,
+                     "completion must begin from one complete rendered card shell")
         let completionOrb = V5TaskCompletionFlightGeometry.value(
-            for: .orb, sourceFrame: completionSource,
+            for: .collapsing, sourceFrame: completionSource,
             sourceRing: completionSourceRing, target: completionTarget
         )
-        precondition(completionOrb.ringCenter == completionSourceRing,
-                     "the ring must be born at the card's own completion circle, never its center")
-        precondition(completionOrb.cardOpacity == 0)
-        precondition(completionOrb.ringDiameter == 14 && completionOrb.ringOpacity == 1,
-                     "the rectangular card must hand off to a real circle before travel")
+        precondition(completionOrb.shellCenter == completionSourceRing,
+                     "the same shell must collapse onto the card's own completion circle")
+        precondition(completionOrb.shellSize == CGSize(width: 18, height: 18))
+        precondition(completionOrb.shellCornerRadius == 9)
+        precondition(completionOrb.contentOpacity == 0,
+                     "text and date must be absorbed into the single orange shell")
         let completionArrival = V5TaskCompletionFlightGeometry.value(
-            for: .arrived, sourceFrame: completionSource,
+            for: .traveling, sourceFrame: completionSource,
             sourceRing: completionSourceRing, target: completionTarget
         )
-        precondition(completionArrival.ringCenter == completionTarget)
-        precondition(completionArrival.ringDiameter == 7,
-                     "the final frame must exactly match the calendar indicator")
-        precondition(V5TaskCompletionFlightTiming.modelCommitDelay ==
+        precondition(completionArrival.shellCenter == completionTarget)
+        precondition(completionArrival.shellSize == CGSize(width: 7, height: 7),
+                     "the same orange shell must finish at calendar-indicator size")
+        precondition(V5TaskCompletionSourceSlotPolicy.holdsSlot(during: .card))
+        precondition(V5TaskCompletionSourceSlotPolicy.holdsSlot(during: .collapsing),
+                     "the next row must not move through a card that is still collapsing")
+        precondition(!V5TaskCompletionSourceSlotPolicy.holdsSlot(during: .traveling),
+                     "the source slot may close only after the orb has formed")
+        precondition(V5TaskCompletionFlightTiming.collapseStartDelay > 0,
+                     "the complete source card must render before its morph begins")
+        precondition(V5TaskCompletionFlightTiming.collapseDuration >= 0.28,
+                     "the card-to-ring morph must remain perceptible at 60 fps")
+        precondition(V5TaskCompletionFlightTiming.totalDuration ==
+                     V5TaskCompletionFlightTiming.collapseStartDelay +
                      V5TaskCompletionFlightTiming.collapseDuration +
                      V5TaskCompletionFlightTiming.travelDuration,
-                     "arrival and model completion must be one event with no second stop")
+                     "the visual flight must have one continuous collapse-and-travel duration")
         precondition(V5TaskCompletionFlightTiming.reducedMotionCommitDelay <
-                     V5TaskCompletionFlightTiming.modelCommitDelay)
+                     V5TaskCompletionFlightTiming.totalDuration)
         precondition(V5TaskCompletionAccent.resolve(isOverdue: true) == .overdue)
         precondition(V5TaskCompletionAccent.resolve(isOverdue: false) == .standard)
+
+        let localCard = V5TaskLocalCompletionPresentation.value(for: .card)
+        let localAcknowledged = V5TaskLocalCompletionPresentation.value(for: .acknowledged)
+        let localCollapsing = V5TaskLocalCompletionPresentation.value(for: .collapsing)
+        precondition(localCard.sourceSlotHeightScale == 1)
+        precondition(!localCard.showsCompletedState)
+        precondition(localAcknowledged.sourceSlotHeightScale == 1,
+                     "an inline completion must stay in its original slot long enough to be understood")
+        precondition(localAcknowledged.showsCompletedState)
+        precondition(localAcknowledged.cardOpacity == 1,
+                     "the completed checkmark and strike-through must be fully visible before collapse")
+        precondition(localCollapsing.sourceSlotHeightScale == 0)
+        precondition(localCollapsing.cardOpacity == 0)
+        precondition(V5TaskLocalCompletionTiming.acknowledgementDuration > 0)
+        precondition(V5TaskLocalCompletionTiming.holdDuration >= 0.12,
+                     "today's completed state needs a perceptible hold instead of disappearing instantly")
+        precondition(V5TaskLocalCompletionTiming.totalDuration >= 0.5)
 
         var completionCalendar = Calendar(identifier: .gregorian)
         completionCalendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
@@ -216,22 +246,36 @@ struct V5WorkbenchPresentationSmoke {
         let completionTask = UUID()
         let completionSession = UUID()
         var lifecycle = V5TaskCompletionLifecycle()
-        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
+        precondition(lifecycle.begin(
+            sessionID: completionSession,
+            taskID: completionTask
+        )?.taskID == completionTask,
+        "starting the visual flight must return the task command for immediate commit")
         precondition(lifecycle.navigate() == [],
-                     "changing the selected date must never commit a flight early")
+                     "navigation cancels only visual coordinates; task data was already committed")
         precondition(lifecycle.arrive(sessionID: completionSession) == nil,
                      "navigation must cancel stale flight coordinates")
-        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
+        precondition(lifecycle.begin(
+            sessionID: completionSession,
+            taskID: completionTask
+        )?.taskID == completionTask)
         precondition(lifecycle.calendarChanged() == [],
-                     "changing the visible month must cancel stale geometry without committing")
+                     "changing the visible month cancels stale geometry without undoing completion")
         precondition(lifecycle.arrive(sessionID: completionSession) == nil,
-                     "a cancelled flight must not commit at its old coordinate")
-        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
+                     "a cancelled visual flight must not finish at its old coordinate")
+        precondition(lifecycle.begin(
+            sessionID: completionSession,
+            taskID: completionTask
+        )?.taskID == completionTask)
         precondition(lifecycle.arrive(sessionID: completionSession) == completionTask,
-                     "completion may commit only when its own flight arrives")
-        lifecycle.begin(sessionID: UUID(), taskID: UUID())
+                     "arrival closes only its own visual flight without a second data mutation")
+        let cancelledTask = UUID()
+        precondition(lifecycle.begin(
+            sessionID: UUID(),
+            taskID: cancelledTask
+        )?.taskID == cancelledTask)
         precondition(lifecycle.cancelAll().isEmpty,
-                     "closing the preview cancels unfinished flights without changing task data")
+                     "closing the preview cancels visuals without rolling completed data back")
 
         precondition(!V5TaskListOverflowPresentation.disablesScrollClipping,
                      "task rows must never render across the composer or footer")
@@ -282,16 +326,250 @@ struct V5WorkbenchPresentationSmoke {
         ), "changing only the due date must not recreate the whole task card")
         precondition(activeRowIdentity != V5TaskRowIdentity.value(
             taskID: stableTaskID, isCompleted: true
-        ), "completion may still move the task between active and completed sections")
+        ), "completion must refresh the row's controls while the list transaction suppresses outgoing animation")
         precondition(V5TaskDateFlipPresentation.duration >= 0.45,
                      "the date-only page turn must be slow enough to read")
         precondition(V5TaskDateFlipPresentation.duration <= 0.60,
                      "the date-only page turn must remain responsive")
         precondition(V5TaskDateFlipPresentation.cardScale == 1,
                      "date changes must never flip or scale the containing task card")
+        precondition(!V5TaskDateFlipPresentation.usesOutgoingTextLayer,
+                     "a date turn must animate one authoritative label instead of overlapping old and new glyphs")
         precondition(V5TaskDateFlipPresentation.reducedMotionDuration <
                      V5TaskDateFlipPresentation.duration,
                      "reduced motion must replace the page turn with a short cross-fade")
+
+        precondition(!V5TaskListAnimationPolicy.animatesWholeList(for: .selectedDateChanged),
+                     "switching days must replace the list atomically without old/new rows overlapping")
+        precondition(!V5TaskListAnimationPolicy.animatesWholeList(for: .taskDateMoved),
+                     "moving a task between date sections must not animate the whole stack")
+        precondition(!V5TaskListAnimationPolicy.animatesWholeList(for: .taskCompletionChanged),
+                     "completion must update section membership atomically without old/new rows overlapping")
+        precondition(V5TaskListAnimationPolicy.animatesWholeList(for: .completedDisclosureChanged),
+                     "expanding completed work may keep the deliberate list transition")
+        precondition(V5TaskDropAnimationTiming.modelCommitDelay == 0,
+                     "the reassigned date must become authoritative on release, before visual absorption finishes")
+
+        precondition(V5DayCellEmphasis.resolve(
+            isDraggingTask: true,
+            isDropTarget: true,
+            isSelected: true,
+            isToday: true,
+            isHovered: true
+        ) == .dropTarget,
+        "during a drag, the legal destination must be the only strong blue calendar emphasis")
+        precondition(V5DayCellEmphasis.resolve(
+            isDraggingTask: true,
+            isDropTarget: false,
+            isSelected: true,
+            isToday: false,
+            isHovered: true
+        ) == .none,
+        "the old selection and stale hover must disappear while a task is being dragged")
+        precondition(V5DayCellEmphasis.resolve(
+            isDraggingTask: true,
+            isDropTarget: false,
+            isSelected: false,
+            isToday: true,
+            isHovered: true
+        ) == .today,
+        "today may keep its passive reference ring during a drag")
+
+        let navigationReady = V5CalendarKeyboardContext(
+            isTextInputFocused: false,
+            isEditingTask: false,
+            isDraggingTask: false,
+            isChoosingYear: false
+        )
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .up,
+            isCommandPressed: false,
+            context: navigationReady
+        ) == .moveSelectionByDays(-7))
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .down,
+            isCommandPressed: false,
+            context: navigationReady
+        ) == .moveSelectionByDays(7))
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .left,
+            isCommandPressed: false,
+            context: navigationReady
+        ) == .moveSelectionByDays(-1))
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .right,
+            isCommandPressed: false,
+            context: navigationReady
+        ) == .moveSelectionByDays(1))
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .left,
+            isCommandPressed: true,
+            context: navigationReady
+        ) == .moveSelectionByMonths(-1))
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .right,
+            isCommandPressed: true,
+            context: navigationReady
+        ) == .moveSelectionByMonths(1))
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .up,
+            isCommandPressed: true,
+            context: navigationReady
+        ) == nil)
+        precondition(V5CalendarKeyboardEventRouting.direction(forKeyCode: 126) == .up)
+        precondition(V5CalendarKeyboardEventRouting.direction(forKeyCode: 125) == .down)
+        precondition(V5CalendarKeyboardEventRouting.direction(forKeyCode: 123) == .left)
+        precondition(V5CalendarKeyboardEventRouting.direction(forKeyCode: 124) == .right)
+        precondition(V5CalendarKeyboardEventRouting.action(
+            forKeyCode: 17,
+            isCommandPressed: true,
+            hasDisallowedModifiers: false,
+            context: navigationReady
+        ) == .jumpToToday, "Command-T must share the same Today action as the visible button")
+        precondition(V5CalendarKeyboardEventRouting.action(
+            forKeyCode: 17,
+            isCommandPressed: false,
+            hasDisallowedModifiers: false,
+            context: navigationReady
+        ) == nil, "plain text input must never be consumed as a calendar shortcut")
+        precondition(V5CalendarKeyboardEventRouting.action(
+            forKeyCode: 124,
+            isCommandPressed: true,
+            hasDisallowedModifiers: true,
+            context: navigationReady
+        ) == nil, "mixed modifiers must remain available to the system")
+        precondition(V5CalendarKeyboardEventRouting.action(
+            forKeyCode: 53,
+            isCommandPressed: false,
+            hasDisallowedModifiers: false,
+            context: V5CalendarKeyboardContext(
+                isTextInputFocused: true,
+                isEditingTask: false,
+                isDraggingTask: false,
+                isChoosingYear: true
+            )
+        ) == .escapeChooser,
+        "the chooser must receive Escape even when the composer retained first responder")
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .down,
+            isCommandPressed: false,
+            context: V5CalendarKeyboardContext(
+                isTextInputFocused: true,
+                isEditingTask: false,
+                isDraggingTask: false,
+                isChoosingYear: false
+            )
+        ) == nil, "calendar navigation must not steal cursor keys from task input")
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .down,
+            isCommandPressed: false,
+            context: V5CalendarKeyboardContext(
+                isTextInputFocused: false,
+                isEditingTask: false,
+                isDraggingTask: true,
+                isChoosingYear: false
+            )
+        ) == nil, "month navigation must not invalidate an active drag target")
+        precondition(V5CalendarKeyboardNavigation.action(
+            for: .down,
+            isCommandPressed: false,
+            context: V5CalendarKeyboardContext(
+                isTextInputFocused: false,
+                isEditingTask: false,
+                isDraggingTask: false,
+                isChoosingYear: true
+            )
+        ) == nil, "the year chooser is intentionally mouse-driven")
+
+        let centeredYears = V5YearChooserPresentation.years(containing: 2026)
+        precondition(centeredYears == Array(2022...2033))
+        precondition(centeredYears.firstIndex(of: 2026) == 4,
+                     "this year belongs in the second row's center cell")
+        precondition(V5YearChooserPresentation.yearsPerPage == 12)
+        precondition(V5YearChooserPresentation.yearColumns == 3)
+        precondition(V5YearChooserPresentation.yearRows == 4)
+        precondition(V5YearChooserPresentation.months == Array(1...12))
+        precondition(V5YearChooserPresentation.monthColumns == V5YearChooserPresentation.yearColumns)
+        precondition(V5YearChooserPresentation.monthRows == V5YearChooserPresentation.yearRows,
+                     "year and month levels must keep one stable 3-by-4 spatial skeleton")
+        precondition(V5YearChooserPresentation.choiceNumberFontSize >= 60,
+                     "year and month numbers must occupy the large selection cells confidently")
+        precondition(V5YearChooserPresentation.selectionCanvasInset >= selectedGlow.outerRadius,
+                     "outer year and month cells need enough breathing room for the shared glow")
+        precondition(V5YearChooserPresentation.previousPageStart(containing: 2026) == 2010)
+        precondition(V5YearChooserPresentation.nextPageStart(containing: 2026) == 2034)
+        precondition(V5YearMonthChooserNavigation.escapeDestination(from: .months) == .years)
+        precondition(V5YearMonthChooserNavigation.escapeDestination(from: .years) == nil,
+                     "Escape closes the chooser only after returning to the year level")
+        precondition(V5YearChooserPresentation.selectionFeedbackDuration >= 0.16)
+        precondition(V5YearChooserPresentation.selectionFeedbackDuration <= 0.28,
+                     "selection feedback must be visible without making the picker feel delayed")
+
+        var railCalendar = Calendar(identifier: .gregorian)
+        railCalendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        railCalendar.firstWeekday = 2
+        let september10 = railCalendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 10, hour: 12
+        ))!
+        let october10 = railCalendar.date(from: DateComponents(
+            year: 2026, month: 10, day: 10, hour: 12
+        ))!
+        guard let forwardRail = V5CalendarMonthRailPlan.make(
+            sourceMonth: september10,
+            targetMonth: october10,
+            sourceSelection: september10,
+            targetSelection: october10,
+            calendar: railCalendar
+        ) else {
+            preconditionFailure("adjacent months must produce a continuous week rail")
+        }
+        precondition(forwardRail.sourceWeekIndex == 0)
+        precondition(forwardRail.targetWeekIndex == 4,
+                     "September 2026 advances to October by four shared calendar weeks")
+        precondition(forwardRail.sourceOffsetY == 0)
+        precondition(forwardRail.targetOffsetY == -4 * V5CalendarMonthRailPresentation.rowPitch)
+        precondition(Set(forwardRail.days).count == forwardRail.days.count,
+                     "the rolling rail must render every real date once instead of stacking duplicate month pages")
+        precondition(forwardRail.days.count == 70,
+                     "two six-week month windows with four shared weeks need ten unique weeks")
+
+        guard let backwardRail = V5CalendarMonthRailPlan.make(
+            sourceMonth: october10,
+            targetMonth: september10,
+            sourceSelection: october10,
+            targetSelection: september10,
+            calendar: railCalendar
+        ) else {
+            preconditionFailure("reverse navigation must use the same chronological rail")
+        }
+        precondition(backwardRail.sourceWeekIndex == 4)
+        precondition(backwardRail.targetWeekIndex == 0)
+        precondition(backwardRail.sourceOffsetY == -4 * V5CalendarMonthRailPresentation.rowPitch)
+        precondition(backwardRail.targetOffsetY == 0)
+        precondition(!V5CalendarMonthRailPresentation.usesOpacityReplacement)
+        precondition(V5CalendarMonthRailPresentation.installationDelay >= 1.0 / 60.0,
+                     "the source rail needs at least one display pass before motion starts")
+        precondition(V5CalendarMonthRailPresentation.headerControlOpacity == 1,
+                     "month motion must never dim the year or Today controls")
+
+        let january31 = railCalendar.date(from: DateComponents(
+            year: 2025, month: 1, day: 31, hour: 12
+        ))!
+        let preferredFebruary = V5CalendarDateNavigation.movingMonths(
+            1,
+            from: january31,
+            preferredDay: 31,
+            calendar: railCalendar
+        )!
+        let restoredMarch = V5CalendarDateNavigation.movingMonths(
+            1,
+            from: preferredFebruary,
+            preferredDay: 31,
+            calendar: railCalendar
+        )!
+        precondition(railCalendar.component(.day, from: preferredFebruary) == 28)
+        precondition(railCalendar.component(.day, from: restoredMarch) == 31,
+                     "a clamped February must not permanently erase the user's preferred day")
 
         precondition(V5DayTaskIndicatorStyle.resolve(activeCount: 0, completedCount: 0) == .none)
         precondition(V5DayTaskIndicatorStyle.resolve(activeCount: 2, completedCount: 3) == .activeRing,

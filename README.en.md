@@ -9,20 +9,21 @@
 A local-first macOS menu-bar utility that brings calendars, daily todos, overdue work,
 reusable prompts, and local AI Skill indexes into one quick-access workspace.
 
-Current source release: **2.0.4 build 24 · Calendar V5**.
+Current source release: **2.0.5 build 25 · Calendar V5**.
 
 Desktop Sentry is written in Swift and SwiftUI and requires no account or cloud service.
 Settings and the calendar footer display the version, build, and calendar generation;
 source previews also include their Git revision so bug reports can identify the exact binary.
 
-## What changed in 2.0.4
+## What changed in 2.0.5
 
-- **Overdue work on today's page:** unfinished tasks keep their original due date and are surfaced in today's overdue section.
-- **Completed work in context:** each day shows its three most recent completed tasks inline, with an option to reveal all of them.
-- **Stable date movement:** tasks can move repeatedly between dates; moving into the past immediately marks them overdue without losing ownership.
-- **Complete reminder lifecycle:** moving, completing, restoring, or deleting a task updates its local macOS notification.
-- **Reliable row interaction:** date changes no longer leave individual cards dimmed, untappable, or undraggable.
-- **Visible binary identity:** releases display `2.0.4 (24) · V5`; source previews additionally show their revision and preview status.
+- **Continuous month motion:** dates now move along one chronological vertical rail instead of replacing one month view with another.
+- **Stable rapid navigation:** repeated button or keyboard input is handled in order while preserving the user's preferred day when possible.
+- **Persistent header controls:** year, Today, month arrows, and appearance controls no longer dim while the calendar is moving.
+- **Unified year and month chooser:** both surfaces use a consistent 3-by-4 layout with the calendar's hover and selection treatment.
+- **Visible same-day completion:** a task shows its completed state and blue acknowledgement before folding away in place.
+- **Accurate overdue ownership:** overdue work shown on Today still returns to its real date, while other date pages no longer repeat the global overdue section.
+- **Visible binary identity:** releases display `2.0.5 (25) · V5`; source previews additionally show their revision and preview status.
 
 ## Motion upgrade
 
@@ -30,7 +31,8 @@ Motion communicates where a task came from and where it belongs; it is not decor
 
 - A dragged card collapses into a small ring attached to the pointer, then lands directly on the target date without a false intermediate stop.
 - Completing a historical overdue task from today's page turns the card into an orange ring that returns to its actual due date.
-- Completing a task on its own date stays inline—there is no spatially misleading flight.
+- Completing a task on its own date shows an in-place checkmark, strike-through, and blue acknowledgement before folding away; there is no spatially misleading flight.
+- Month changes scroll one shared chronological date rail vertically and do not use an opacity-based view replacement.
 - Changing a due date flips only the compact date badge while the containing card remains stable.
 - Selection restores the V5 deep-blue fill, in-place blue border, and soft glow. Landing feedback stays about two points beyond the card instead of expanding outward.
 - When Reduce Motion is enabled, complex travel is replaced with shorter, restrained feedback.

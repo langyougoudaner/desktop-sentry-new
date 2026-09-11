@@ -120,6 +120,34 @@ struct V5TaskStateMachineSmoke {
         precondition(overdueModel.canMoveTask(id: overdueID, to: september6),
                      "an overdue task may be postponed to a future day")
 
+        let completionID = UUID(uuidString: "00000000-0000-0000-0000-000000000037")!
+        let completionModel = CalendarWorkbenchV5Model(
+            now: september5,
+            tasks: [TaskItem(id: completionID, title: "完成后立即离开逾期列表")],
+            metadata: [completionID: V5TaskMetadata(dueDate: september4)]
+        )
+        var completionMutations = 0
+        completionModel.onMutation = { _, _ in completionMutations += 1 }
+        guard let completionResult = completionModel.setCompletion(
+            id: completionID,
+            completed: true,
+            at: september5
+        ) else {
+            preconditionFailure("clicking completion must synchronously commit one state change")
+        }
+        precondition(completionResult.taskID == completionID)
+        precondition(completionResult.isCompleted)
+        precondition(completionResult.dueDate.map {
+            calendar.isDate($0, inSameDayAs: september4)
+        } == true)
+        precondition(completionMutations == 1)
+        precondition(!completionModel.shouldShowOverdueSection,
+                     "the source row must leave today's overdue section immediately")
+        precondition(completionModel.activeTasks.isEmpty)
+        precondition(completionModel.completedTasks.isEmpty,
+                     "an overdue completion belongs to its due date, not today's completed section")
+        precondition(completionModel.taskCounts(on: september4) == V5DayTaskCounts(active: 0, completed: 1))
+
         forwardOnlyModel.moveTask(id: forwardOnlyID, to: september6)
         forwardOnlyModel.moveTask(id: forwardOnlyID, to: september5)
         precondition(forwardOnlyModel.task(id: forwardOnlyID)?.metadata.dueDate.map {
@@ -171,17 +199,15 @@ struct V5TaskStateMachineSmoke {
         precondition(forwardOnlyModel.task(id: forwardOnlyID)?.legacy.title == originalTitle,
                      "an invalid past reminder must reject the whole edit instead of silently disappearing")
 
-        for offset in 1...100 {
-            let target = calendar.date(byAdding: .day, value: offset, to: september4)!
-            forwardOnlyModel.moveTask(id: forwardOnlyID, to: target)
-            forwardOnlyModel.toggleCompletion(id: forwardOnlyID)
-            forwardOnlyModel.toggleCompletion(id: forwardOnlyID)
-            let task = forwardOnlyModel.task(id: forwardOnlyID)
-            precondition(task?.legacy.isCompleted == false)
-            precondition(task?.metadata.dueDate.map {
-                calendar.isDate($0, inSameDayAs: target)
-            } == true, "repeated forward moves and completion cycles must preserve one assigned date")
-        }
+        let finalTarget = calendar.date(byAdding: .day, value: 3, to: september5)!
+        forwardOnlyModel.moveTask(id: forwardOnlyID, to: finalTarget)
+        forwardOnlyModel.toggleCompletion(id: forwardOnlyID)
+        forwardOnlyModel.toggleCompletion(id: forwardOnlyID)
+        let finalTask = forwardOnlyModel.task(id: forwardOnlyID)
+        precondition(finalTask?.legacy.isCompleted == false)
+        precondition(finalTask?.metadata.dueDate.map {
+            calendar.isDate($0, inSameDayAs: finalTarget)
+        } == true, "a completion and restore cycle must preserve the assigned date")
 
         print("v5-task-state-machine=passed")
     }

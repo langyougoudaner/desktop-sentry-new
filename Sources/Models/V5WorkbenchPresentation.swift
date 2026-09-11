@@ -160,6 +160,28 @@ struct V5TaskListCanvasGeometry {
     var contentMaxX: CGFloat { contentMinX + contentWidth }
 }
 
+struct V5TaskRowStatusPresentation: Equatable {
+    let dateText: String
+    let isOverdue: Bool
+
+    static func resolve(
+        task: CalendarWorkbenchV5Task,
+        today: Date,
+        calendar: Calendar
+    ) -> Self {
+        guard let dueDate = task.metadata.dueDate else {
+            return Self(dateText: "未排期", isOverdue: false)
+        }
+        let components = calendar.dateComponents([.month, .day], from: dueDate)
+        let dateText = "\(components.month ?? 0)月\(components.day ?? 0)日"
+        return Self(
+            dateText: dateText,
+            isOverdue: !task.legacy.isCompleted
+                && calendar.startOfDay(for: dueDate) < calendar.startOfDay(for: today)
+        )
+    }
+}
+
 struct V5TaskRowRevealPresentation {
     let cardScale: CGFloat
     let showsInsetStroke: Bool
@@ -208,10 +230,319 @@ enum V5TaskRowIdentity {
     }
 }
 
+enum V5TaskListMutationCause {
+    case selectedDateChanged
+    case taskDateMoved
+    case taskCompletionChanged
+    case completedDisclosureChanged
+}
+
+/// Date navigation and date reassignment replace the rendered task snapshot in
+/// one transaction. Animating the entire stack for those events lets SwiftUI
+/// retain outgoing rows while inserting the new sections, which creates stale
+/// badges, overlapping headers, and apparent vertical jumps.
+enum V5TaskListAnimationPolicy {
+    static func animatesWholeList(for cause: V5TaskListMutationCause) -> Bool {
+        switch cause {
+        case .selectedDateChanged, .taskDateMoved:
+            return false
+        case .taskCompletionChanged:
+            return false
+        case .completedDisclosureChanged:
+            return true
+        }
+    }
+}
+
+enum V5CalendarDirectionalKey {
+    case up
+    case down
+    case left
+    case right
+}
+
+enum V5CalendarKeyboardAction: Equatable {
+    case moveSelectionByDays(Int)
+    case moveSelectionByMonths(Int)
+    case jumpToToday
+    case escapeChooser
+}
+
+struct V5CalendarKeyboardContext: Equatable {
+    let isTextInputFocused: Bool
+    let isEditingTask: Bool
+    let isDraggingTask: Bool
+    let isChoosingYear: Bool
+
+    var allowsCalendarNavigation: Bool {
+        !isTextInputFocused && !isEditingTask && !isDraggingTask && !isChoosingYear
+    }
+}
+
+enum V5CalendarKeyboardNavigation {
+    static func action(
+        for key: V5CalendarDirectionalKey,
+        isCommandPressed: Bool,
+        context: V5CalendarKeyboardContext
+    ) -> V5CalendarKeyboardAction? {
+        guard context.allowsCalendarNavigation else { return nil }
+        if isCommandPressed {
+            switch key {
+            case .left:
+                return .moveSelectionByMonths(-1)
+            case .right:
+                return .moveSelectionByMonths(1)
+            case .up, .down:
+                return nil
+            }
+        }
+        switch key {
+        case .up:
+            return .moveSelectionByDays(-7)
+        case .down:
+            return .moveSelectionByDays(7)
+        case .left:
+            return .moveSelectionByDays(-1)
+        case .right:
+            return .moveSelectionByDays(1)
+        }
+    }
+}
+
+enum V5CalendarKeyboardEventRouting {
+    static func direction(forKeyCode keyCode: UInt16) -> V5CalendarDirectionalKey? {
+        switch keyCode {
+        case 123:
+            return .left
+        case 124:
+            return .right
+        case 126:
+            return .up
+        case 125:
+            return .down
+        default:
+            return nil
+        }
+    }
+
+    static func action(
+        forKeyCode keyCode: UInt16,
+        isCommandPressed: Bool,
+        hasDisallowedModifiers: Bool,
+        context: V5CalendarKeyboardContext
+    ) -> V5CalendarKeyboardAction? {
+        guard !hasDisallowedModifiers else { return nil }
+        if keyCode == 53, !isCommandPressed, context.isChoosingYear {
+            return .escapeChooser
+        }
+        guard context.allowsCalendarNavigation else { return nil }
+        if keyCode == 17 {
+            return isCommandPressed ? .jumpToToday : nil
+        }
+        guard let direction = direction(forKeyCode: keyCode) else { return nil }
+        return V5CalendarKeyboardNavigation.action(
+            for: direction,
+            isCommandPressed: isCommandPressed,
+            context: context
+        )
+    }
+}
+
+enum V5CalendarDateNavigation {
+    static func movingDays(_ value: Int, from date: Date, calendar: Calendar) -> Date? {
+        calendar.date(byAdding: .day, value: value, to: calendar.startOfDay(for: date))
+            .map(calendar.startOfDay(for:))
+    }
+
+    static func movingMonths(
+        _ value: Int,
+        from date: Date,
+        preferredDay: Int? = nil,
+        calendar: Calendar
+    ) -> Date? {
+        let source = calendar.startOfDay(for: date)
+        let sourceDay = preferredDay ?? calendar.component(.day, from: source)
+        var firstDayComponents = calendar.dateComponents([.era, .year, .month], from: source)
+        firstDayComponents.day = 1
+        guard let sourceMonth = calendar.date(from: firstDayComponents),
+              let targetMonth = calendar.date(byAdding: .month, value: value, to: sourceMonth),
+              let validDays = calendar.range(of: .day, in: .month, for: targetMonth) else {
+            return nil
+        }
+        var targetComponents = calendar.dateComponents([.era, .year, .month], from: targetMonth)
+        targetComponents.day = min(max(1, sourceDay), validDays.count)
+        return calendar.date(from: targetComponents).map(calendar.startOfDay(for:))
+    }
+
+    static func replacingYear(_ year: Int, in date: Date, calendar: Calendar) -> Date? {
+        replacingYearAndMonth(
+            year: year,
+            month: calendar.component(.month, from: date),
+            in: date,
+            calendar: calendar
+        )
+    }
+
+    static func replacingYearAndMonth(
+        year: Int,
+        month: Int,
+        in date: Date,
+        calendar: Calendar
+    ) -> Date? {
+        guard (1...12).contains(month) else { return nil }
+        let source = calendar.startOfDay(for: date)
+        let sourceDay = calendar.component(.day, from: source)
+        var firstDayComponents = calendar.dateComponents([.era], from: source)
+        firstDayComponents.year = year
+        firstDayComponents.month = month
+        firstDayComponents.day = 1
+        guard let targetMonth = calendar.date(from: firstDayComponents),
+              let validDays = calendar.range(of: .day, in: .month, for: targetMonth) else {
+            return nil
+        }
+        var targetComponents = calendar.dateComponents([.era, .year, .month], from: targetMonth)
+        targetComponents.day = min(sourceDay, validDays.count)
+        return calendar.date(from: targetComponents).map(calendar.startOfDay(for:))
+    }
+}
+
+enum V5CalendarMonthRailPresentation {
+    static let rowHeight: CGFloat = 78
+    static let rowSpacing: CGFloat = 4
+    static let rowPitch = rowHeight + rowSpacing
+    static let viewportHeight: CGFloat = rowHeight * 6 + rowSpacing * 5
+    /// Give SwiftUI one display pass to install the shared rail at its source
+    /// offset before animating it. Without this separation both state writes
+    /// can be coalesced and the month appears to replace in place.
+    static let installationDelay: TimeInterval = 0.035
+    static let usesOpacityReplacement = false
+    static let headerControlOpacity = 1.0
+
+    static func duration(forWeekDistance distance: Int) -> Double {
+        let boundedDistance = min(max(abs(distance), 1), 6)
+        return 0.38 + Double(boundedDistance) * 0.025
+    }
+}
+
+/// A chronological, duplicate-free strip of calendar weeks shared by the
+/// outgoing and incoming months. Moving its offset preserves the weeks already
+/// visible in both month windows instead of replacing one 42-day grid with a
+/// second copy of the same boundary dates.
+struct V5CalendarMonthRailPlan: Equatable {
+    let sourceMonth: Date
+    let targetMonth: Date
+    let sourceSelection: Date
+    let targetSelection: Date
+    let days: [Date]
+    let sourceWeekIndex: Int
+    let targetWeekIndex: Int
+
+    var sourceOffsetY: CGFloat {
+        -CGFloat(sourceWeekIndex) * V5CalendarMonthRailPresentation.rowPitch
+    }
+
+    var targetOffsetY: CGFloat {
+        -CGFloat(targetWeekIndex) * V5CalendarMonthRailPresentation.rowPitch
+    }
+
+    var weekDistance: Int { targetWeekIndex - sourceWeekIndex }
+
+    static func make(
+        sourceMonth: Date,
+        targetMonth: Date,
+        sourceSelection: Date,
+        targetSelection: Date,
+        calendar: Calendar
+    ) -> Self? {
+        guard let sourceMonthStart = calendar.dateInterval(of: .month, for: sourceMonth)?.start,
+              let targetMonthStart = calendar.dateInterval(of: .month, for: targetMonth)?.start,
+              let sourceGridStart = gridStart(for: sourceMonthStart, calendar: calendar),
+              let targetGridStart = gridStart(for: targetMonthStart, calendar: calendar),
+              !calendar.isDate(sourceMonthStart, equalTo: targetMonthStart, toGranularity: .month)
+        else { return nil }
+
+        let railStart = min(sourceGridStart, targetGridStart)
+        guard let sourceDayDistance = calendar.dateComponents(
+            [.day], from: railStart, to: sourceGridStart
+        ).day,
+        let targetDayDistance = calendar.dateComponents(
+            [.day], from: railStart, to: targetGridStart
+        ).day,
+        sourceDayDistance.isMultiple(of: 7),
+        targetDayDistance.isMultiple(of: 7),
+        let sourceEnd = calendar.date(byAdding: .day, value: 41, to: sourceGridStart),
+        let targetEnd = calendar.date(byAdding: .day, value: 41, to: targetGridStart)
+        else { return nil }
+
+        let railEnd = max(sourceEnd, targetEnd)
+        guard let totalDays = calendar.dateComponents([.day], from: railStart, to: railEnd).day
+        else { return nil }
+        let days = (0...totalDays).compactMap {
+            calendar.date(byAdding: .day, value: $0, to: railStart).map(calendar.startOfDay(for:))
+        }
+
+        return Self(
+            sourceMonth: calendar.startOfDay(for: sourceMonthStart),
+            targetMonth: calendar.startOfDay(for: targetMonthStart),
+            sourceSelection: calendar.startOfDay(for: sourceSelection),
+            targetSelection: calendar.startOfDay(for: targetSelection),
+            days: days,
+            sourceWeekIndex: sourceDayDistance / 7,
+            targetWeekIndex: targetDayDistance / 7
+        )
+    }
+
+    private static func gridStart(for monthStart: Date, calendar: Calendar) -> Date? {
+        let leading = (
+            calendar.component(.weekday, from: monthStart) - calendar.firstWeekday + 7
+        ) % 7
+        return calendar.date(byAdding: .day, value: -leading, to: monthStart)
+            .map(calendar.startOfDay(for:))
+    }
+}
+
+enum V5YearChooserPresentation {
+    static let yearsPerPage = 12
+    static let leadingYears = 4
+    static let yearColumns = 3
+    static let yearRows = 4
+    static let months = Array(1...12)
+    static let monthColumns = 3
+    static let monthRows = 4
+    static let choiceNumberFontSize: CGFloat = 60
+    static let selectionCanvasInset: CGFloat = 14
+    static let selectionFeedbackDuration = 0.20
+
+    static func years(containing anchorYear: Int) -> [Int] {
+        let start = anchorYear - leadingYears
+        return Array(start..<(start + yearsPerPage))
+    }
+
+    static func previousPageStart(containing anchorYear: Int) -> Int {
+        anchorYear - leadingYears - yearsPerPage
+    }
+
+    static func nextPageStart(containing anchorYear: Int) -> Int {
+        anchorYear - leadingYears + yearsPerPage
+    }
+}
+
+enum V5YearMonthChooserStage: Equatable {
+    case years
+    case months
+}
+
+enum V5YearMonthChooserNavigation {
+    static func escapeDestination(from stage: V5YearMonthChooserStage) -> V5YearMonthChooserStage? {
+        stage == .months ? .years : nil
+    }
+}
+
 enum V5TaskDateFlipPresentation {
     static let duration = 0.48
     static let reducedMotionDuration = 0.10
     static let cardScale: CGFloat = 1
+    static let usesOutgoingTextLayer = false
     static let tiltDegrees = 78.0
     static let perspective: CGFloat = 0.58
 }
@@ -303,6 +634,11 @@ enum V5TaskDropCommitPolicy {
     static func resolvedTarget(atRelease candidate: Date?) -> Date? { candidate }
 }
 
+enum V5TaskDragGesturePolicy {
+    static let minimumDistance: CGFloat = 8
+    static let excludesCompletionControl = false
+}
+
 enum V5TaskDragAnchorGeometry {
     /// Source circles, drag locations and day indicators are all measured in
     /// the named workbench coordinate space. The rendered frame center is the
@@ -338,37 +674,120 @@ enum V5ResolvedTaskDragGeometry {
 
 enum V5TaskDropAnimationTiming {
     static let absorbDuration = 0.16
-    static let modelCommitDelay = absorbDuration
+    static let modelCommitDelay = 0.0
 }
 
 enum V5TaskCompletionFlightPhase: Equatable {
     case card
-    case orb
-    case arrived
+    case collapsing
+    case traveling
+}
+
+enum V5TaskLocalCompletionPhase: Equatable {
+    case card
+    case acknowledged
+    case collapsing
+}
+
+struct V5TaskLocalCompletionPresentation: Equatable {
+    let sourceSlotHeightScale: CGFloat
+    let cardScaleY: CGFloat
+    let cardOpacity: Double
+    let blueBloomOpacity: Double
+    let showsCompletedState: Bool
+
+    static func value(for phase: V5TaskLocalCompletionPhase) -> Self {
+        switch phase {
+        case .card:
+            return Self(
+                sourceSlotHeightScale: 1,
+                cardScaleY: 1,
+                cardOpacity: 1,
+                blueBloomOpacity: 0,
+                showsCompletedState: false
+            )
+        case .acknowledged:
+            return Self(
+                sourceSlotHeightScale: 1,
+                cardScaleY: 1,
+                cardOpacity: 1,
+                blueBloomOpacity: 0.24,
+                showsCompletedState: true
+            )
+        case .collapsing:
+            return Self(
+                sourceSlotHeightScale: 0,
+                cardScaleY: 0.18,
+                cardOpacity: 0,
+                blueBloomOpacity: 0,
+                showsCompletedState: true
+            )
+        }
+    }
+}
+
+enum V5TaskLocalCompletionTiming {
+    static let acknowledgementDuration = 0.16
+    static let holdDuration = 0.18
+    static let collapseDuration = 0.26
+    static let totalDuration = acknowledgementDuration + holdDuration + collapseDuration
+    static let reducedMotionDuration = 0.16
 }
 
 struct V5TaskCompletionFlightGeometry: Equatable {
-    let cardCenter: CGPoint
-    let cardScale: CGFloat
-    let cardOpacity: Double
-    let ringCenter: CGPoint
-    let ringDiameter: CGFloat
-    let ringOpacity: Double
+    let shellCenter: CGPoint
+    let shellSize: CGSize
+    let shellCornerRadius: CGFloat
+    let shellFillOpacity: Double
+    let shellStrokeWidth: CGFloat
+    let contentScale: CGFloat
+    let contentOpacity: Double
 
     static func value(for phase: V5TaskCompletionFlightPhase,
                       sourceFrame: CGRect, sourceRing: CGPoint,
                       target: CGPoint) -> Self {
-        let cardCenter = CGPoint(x: sourceFrame.midX, y: sourceFrame.midY)
         switch phase {
         case .card:
-            return Self(cardCenter: cardCenter, cardScale: 1, cardOpacity: 1,
-                        ringCenter: sourceRing, ringDiameter: 20, ringOpacity: 0)
-        case .orb:
-            return Self(cardCenter: cardCenter, cardScale: 0.08, cardOpacity: 0,
-                        ringCenter: sourceRing, ringDiameter: 14, ringOpacity: 1)
-        case .arrived:
-            return Self(cardCenter: cardCenter, cardScale: 0.08, cardOpacity: 0,
-                        ringCenter: target, ringDiameter: 7, ringOpacity: 1)
+            return Self(
+                shellCenter: CGPoint(x: sourceFrame.midX, y: sourceFrame.midY),
+                shellSize: sourceFrame.size,
+                shellCornerRadius: 11,
+                shellFillOpacity: 1,
+                shellStrokeWidth: 1,
+                contentScale: 1,
+                contentOpacity: 1
+            )
+        case .collapsing:
+            return Self(
+                shellCenter: sourceRing,
+                shellSize: CGSize(width: 18, height: 18),
+                shellCornerRadius: 9,
+                shellFillOpacity: 0,
+                shellStrokeWidth: 2,
+                contentScale: 0.05,
+                contentOpacity: 0
+            )
+        case .traveling:
+            return Self(
+                shellCenter: target,
+                shellSize: CGSize(width: 7, height: 7),
+                shellCornerRadius: 3.5,
+                shellFillOpacity: 0,
+                shellStrokeWidth: 1.35,
+                contentScale: 0.05,
+                contentOpacity: 0
+            )
+        }
+    }
+}
+
+enum V5TaskCompletionSourceSlotPolicy {
+    static func holdsSlot(during phase: V5TaskCompletionFlightPhase) -> Bool {
+        switch phase {
+        case .card, .collapsing:
+            return true
+        case .traveling:
+            return false
         }
     }
 }
@@ -404,9 +823,10 @@ enum V5TaskCompletionTransition: Equatable {
 }
 
 enum V5TaskCompletionFlightTiming {
-    static let collapseDuration = 0.18
-    static let travelDuration = 0.42
-    static let modelCommitDelay = collapseDuration + travelDuration
+    static let collapseStartDelay = 0.03
+    static let collapseDuration = 0.30
+    static let travelDuration = 0.46
+    static let totalDuration = collapseStartDelay + collapseDuration + travelDuration
     static let reducedMotionCommitDelay = 0.10
 }
 
@@ -416,13 +836,20 @@ enum V5TaskCompletionAdmission {
     }
 }
 
-/// The completion mutation belongs to the arrival event, never to an unrelated
-/// navigation, focus, or window-lifecycle interruption.
+struct V5TaskCompletionStart: Equatable {
+    let taskID: UUID
+}
+
+/// Completion is a data command issued at interaction start. The lifecycle
+/// tracks only the independent visual flight so navigation or window teardown
+/// cannot undo, duplicate, or postpone the user's completed action.
 struct V5TaskCompletionLifecycle {
     private var tasksBySession: [UUID: UUID] = [:]
 
-    mutating func begin(sessionID: UUID, taskID: UUID) {
+    mutating func begin(sessionID: UUID, taskID: UUID) -> V5TaskCompletionStart? {
+        guard tasksBySession[sessionID] == nil else { return nil }
         tasksBySession[sessionID] = taskID
+        return V5TaskCompletionStart(taskID: taskID)
     }
 
     mutating func arrive(sessionID: UUID) -> UUID? {
@@ -503,6 +930,31 @@ enum V5DayCellPresentation {
     static let dateFontSize: CGFloat = 29
     static let lunarTextYOffset: CGFloat = -2
     static let indicatorBottomPadding: CGFloat = 3
+}
+
+enum V5DayCellEmphasis: Equatable {
+    case none
+    case hover
+    case today
+    case selected
+    case dropTarget
+
+    static func resolve(
+        isDraggingTask: Bool,
+        isDropTarget: Bool,
+        isSelected: Bool,
+        isToday: Bool,
+        isHovered: Bool
+    ) -> Self {
+        if isDraggingTask {
+            if isDropTarget { return .dropTarget }
+            return isToday ? .today : .none
+        }
+        if isSelected { return .selected }
+        if isToday { return .today }
+        if isHovered { return .hover }
+        return .none
+    }
 }
 
 enum V5AppearanceTransitionTiming {

@@ -157,6 +157,60 @@ struct CalendarWorkbenchV5Smoke {
         precondition(model.activeTasks[0].metadata.details == "V5 扩展字段")
         precondition(model.activeTasks[0].metadata.reminderAt == nil)
 
+        precondition(model.yearTitle == "2026年")
+        precondition(model.monthTitle == "8月")
+        model.showYear(2028)
+        precondition(model.calendar.component(.year, from: model.displayedMonth) == 2028)
+        precondition(model.calendar.component(.month, from: model.displayedMonth) == 8,
+                     "choosing a year must preserve the displayed month")
+        precondition(model.calendar.component(.year, from: model.selectedDate) == 2028)
+        precondition(model.calendar.component(.month, from: model.selectedDate) == 8)
+        precondition(model.calendar.component(.day, from: model.selectedDate) == 23,
+                     "choosing a year must preserve the selected month and day")
+        model.showYear(2026)
+
+        let january31 = calendar.date(from: DateComponents(year: 2025, month: 1, day: 31, hour: 12))!
+        let clampedMonthModel = CalendarWorkbenchV5Model(now: january31, tasks: [], metadata: [:])
+        clampedMonthModel.moveMonth(by: 1)
+        precondition(clampedMonthModel.calendar.component(.year, from: clampedMonthModel.selectedDate) == 2025)
+        precondition(clampedMonthModel.calendar.component(.month, from: clampedMonthModel.selectedDate) == 2)
+        precondition(clampedMonthModel.calendar.component(.day, from: clampedMonthModel.selectedDate) == 28,
+                     "month navigation must clamp January 31 to February's last valid day")
+        precondition(clampedMonthModel.calendar.isDate(
+            clampedMonthModel.selectedDate,
+            equalTo: clampedMonthModel.displayedMonth,
+            toGranularity: .month
+        ), "the selected date and visible month must remain one authoritative state")
+
+        let leapDay = calendar.date(from: DateComponents(year: 2024, month: 2, day: 29, hour: 12))!
+        let clampedYearModel = CalendarWorkbenchV5Model(now: leapDay, tasks: [], metadata: [:])
+        clampedYearModel.showYear(2025)
+        precondition(clampedYearModel.calendar.component(.year, from: clampedYearModel.selectedDate) == 2025)
+        precondition(clampedYearModel.calendar.component(.month, from: clampedYearModel.selectedDate) == 2)
+        precondition(clampedYearModel.calendar.component(.day, from: clampedYearModel.selectedDate) == 28,
+                     "year selection must clamp leap day without spilling into March")
+
+        let leapFebruary = V5CalendarDateNavigation.replacingYearAndMonth(
+            year: 2028,
+            month: 2,
+            in: january31,
+            calendar: clampedMonthModel.calendar
+        )!
+        precondition(clampedMonthModel.calendar.component(.year, from: leapFebruary) == 2028)
+        precondition(clampedMonthModel.calendar.component(.month, from: leapFebruary) == 2)
+        precondition(clampedMonthModel.calendar.component(.day, from: leapFebruary) == 29,
+                     "choosing a year and month must preserve the day and clamp it once")
+
+        let monthBoundaryModel = CalendarWorkbenchV5Model(now: january31, tasks: [], metadata: [:])
+        monthBoundaryModel.moveSelection(byDays: 1)
+        precondition(monthBoundaryModel.calendar.component(.month, from: monthBoundaryModel.selectedDate) == 2)
+        precondition(monthBoundaryModel.calendar.component(.day, from: monthBoundaryModel.selectedDate) == 1)
+        precondition(monthBoundaryModel.calendar.isDate(
+            monthBoundaryModel.selectedDate,
+            equalTo: monthBoundaryModel.displayedMonth,
+            toGranularity: .month
+        ), "day and week navigation must reveal the selected date's month immediately")
+
         model.draftTitle = "当天新任务"
         model.draftDetails = "默认跟随选中日期"
         var mutationSnapshots: [([TaskItem], [UUID: V5TaskMetadata])] = []

@@ -26,6 +26,18 @@ struct CalendarWorkbenchV5Task: Identifiable, Hashable {
     var id: UUID { legacy.id }
 }
 
+struct V5TaskCompletionResult: Equatable {
+    let taskID: UUID
+    let dueDate: Date?
+    let isCompleted: Bool
+}
+
+struct V5TaskDateMoveResult: Equatable {
+    let taskID: UUID
+    let sourceDate: Date
+    let targetDate: Date
+}
+
 struct V5TaskEditDraft: Equatable {
     var title: String
     var details: String
@@ -88,7 +100,8 @@ final class CalendarWorkbenchV5Model: ObservableObject {
         }
     }
 
-    var monthTitle: String { Self.monthFormatter.string(from: displayedMonth) }
+    var yearTitle: String { "\(calendar.component(.year, from: displayedMonth))年" }
+    var monthTitle: String { "\(calendar.component(.month, from: displayedMonth))月" }
     var selectionTitle: String { Self.selectionFormatter.string(from: selectedDate) }
     var weekdaySymbols: [String] { ["一", "二", "三", "四", "五", "六", "日"] }
 
@@ -157,7 +170,34 @@ final class CalendarWorkbenchV5Model: ObservableObject {
     }
 
     func moveMonth(by value: Int) {
-        displayedMonth = calendar.date(byAdding: .month, value: value, to: displayedMonth) ?? displayedMonth
+        guard value != 0,
+              let target = V5CalendarDateNavigation.movingMonths(
+                value,
+                from: selectedDate,
+                calendar: calendar
+              ) else { return }
+        select(target)
+    }
+
+    func moveSelection(byDays value: Int) {
+        guard value != 0,
+              let target = V5CalendarDateNavigation.movingDays(
+                value,
+                from: selectedDate,
+                calendar: calendar
+              ) else { return }
+        select(target)
+    }
+
+    /// Year selection preserves the current month/day, clamping leap day when
+    /// necessary, so the calendar and task pane never describe different dates.
+    func showYear(_ year: Int) {
+        guard let target = V5CalendarDateNavigation.replacingYear(
+            year,
+            in: selectedDate,
+            calendar: calendar
+        ) else { return }
+        select(target)
     }
 
     /// Makes a visual animation destination available without changing the
@@ -309,14 +349,25 @@ final class CalendarWorkbenchV5Model: ObservableObject {
         setCompletion(id: id, completed: !task.legacy.isCompleted)
     }
 
-    func setCompletion(id: UUID, completed: Bool, at completionDate: Date = Date()) {
+    @discardableResult
+    func setCompletion(
+        id: UUID,
+        completed: Bool,
+        at completionDate: Date = Date()
+    ) -> V5TaskCompletionResult? {
         guard let index = tasks.firstIndex(where: { $0.id == id }),
-              tasks[index].legacy.isCompleted != completed else { return }
+              tasks[index].legacy.isCompleted != completed else { return nil }
         tasks[index].legacy.isCompleted = completed
         tasks[index].metadata.completedAt = completed ? completionDate : nil
         selectedTaskID = nil
         if editingTaskID == id { editingTaskID = nil }
+        let result = V5TaskCompletionResult(
+            taskID: id,
+            dueDate: tasks[index].metadata.dueDate,
+            isCompleted: completed
+        )
         notifyMutation()
+        return result
     }
 
     /// Dragging is a direct date reassignment. Any different calendar day is
@@ -330,9 +381,12 @@ final class CalendarWorkbenchV5Model: ObservableObject {
         return target != calendar.startOfDay(for: dueDate)
     }
 
-    func moveTask(id: UUID, to date: Date) {
+    @discardableResult
+    func moveTask(id: UUID, to date: Date) -> V5TaskDateMoveResult? {
         guard canMoveTask(id: id, to: date),
-              let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+              let index = tasks.firstIndex(where: { $0.id == id }),
+              let dueDate = tasks[index].metadata.dueDate else { return nil }
+        let sourceDate = calendar.startOfDay(for: dueDate)
         let targetDate = calendar.startOfDay(for: date)
         tasks[index].metadata.dueDate = targetDate
         if let reminder = tasks[index].metadata.reminderAt {
@@ -348,7 +402,13 @@ final class CalendarWorkbenchV5Model: ObservableObject {
         // Today/future drops reveal the exact destination day.
         let shouldRevealInOverdueOverview = !tasks[index].legacy.isCompleted && targetDate < today
         select(shouldRevealInOverdueOverview ? today : targetDate)
+        let result = V5TaskDateMoveResult(
+            taskID: id,
+            sourceDate: sourceDate,
+            targetDate: targetDate
+        )
         notifyMutation()
+        return result
     }
 
     /// The UI exposes this only inside the completed list's context menu.
@@ -407,9 +467,6 @@ final class CalendarWorkbenchV5Model: ObservableObject {
         return V5TaskMetadata(dueDate: date, details: details, reminderAt: nil)
     }
 
-    private static let monthFormatter: DateFormatter = {
-        let value = DateFormatter(); value.locale = Locale(identifier: "zh_CN"); value.dateFormat = "yyyy年 M月"; return value
-    }()
     private static let selectionFormatter: DateFormatter = {
         let value = DateFormatter(); value.locale = Locale(identifier: "zh_CN"); value.dateFormat = "M月d日 EEEE"; return value
     }()

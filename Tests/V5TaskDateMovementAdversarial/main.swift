@@ -21,23 +21,36 @@ struct V5TaskDateMovementAdversarial {
             tasks: [TaskItem(id: taskID, title: "日期对抗测试")],
             metadata: [taskID: V5TaskMetadata(dueDate: today, reminderAt: reminder)]
         )
+        let staleRowSnapshot = model.task(id: taskID)!
         var mutations = 0
         model.onMutation = { _, _ in mutations += 1 }
 
         precondition(!model.canMoveTask(id: taskID, to: today),
                      "same-day release is a no-op")
-        model.moveTask(id: taskID, to: future)
+        guard let futureMove = model.moveTask(id: taskID, to: future) else {
+            preconditionFailure("a legal drop must commit exactly one date transaction")
+        }
+        precondition(calendar.isDate(futureMove.sourceDate, inSameDayAs: today))
+        precondition(calendar.isDate(futureMove.targetDate, inSameDayAs: future))
         precondition(model.task(id: taskID)?.metadata.dueDate.map {
             calendar.isDate($0, inSameDayAs: future)
         } == true)
         precondition(model.activeTasks.map(\.id) == [taskID])
 
-        model.moveTask(id: taskID, to: today)
+        guard let todayMove = model.moveTask(id: taskID, to: today) else {
+            preconditionFailure("a task moved forward must be movable back to today")
+        }
+        precondition(calendar.isDate(todayMove.sourceDate, inSameDayAs: future))
+        precondition(calendar.isDate(todayMove.targetDate, inSameDayAs: today))
         precondition(model.isTodaySelected)
         precondition(model.activeTasks.map(\.id) == [taskID],
                      "7 -> 13 -> 7 must restore today's task")
 
-        model.moveTask(id: taskID, to: yesterday)
+        guard let overdueMove = model.moveTask(id: taskID, to: yesterday) else {
+            preconditionFailure("moving a current task to a historical date must commit")
+        }
+        precondition(calendar.isDate(overdueMove.sourceDate, inSameDayAs: today))
+        precondition(calendar.isDate(overdueMove.targetDate, inSameDayAs: yesterday))
         precondition(model.isTodaySelected)
         precondition(model.shouldShowOverdueSection)
         precondition(model.overdueTasks.map(\.id) == [taskID],
@@ -45,6 +58,31 @@ struct V5TaskDateMovementAdversarial {
         precondition(model.activeTasks.isEmpty,
                      "the same overdue task must not also appear in today's section")
         precondition(model.taskCounts(on: yesterday).active == 1)
+        let movedRow = V5TaskRowStatusPresentation.resolve(
+            task: model.task(id: taskID)!,
+            today: model.today,
+            calendar: model.calendar
+        )
+        precondition(movedRow.dateText == "9月6日",
+                     "the visible badge must read the reassigned date in the same transaction")
+        precondition(movedRow.isOverdue,
+                     "the badge accent and section status must derive from the same live task snapshot")
+
+        // A SwiftUI row can retain the value snapshot from before the first
+        // move. The next drop must use the model's live date, never that stale
+        // row value, or yesterday -> today is misclassified as a same-day drop.
+        precondition(staleRowSnapshot.metadata.dueDate.map {
+            calendar.isDate($0, inSameDayAs: today)
+        } == true)
+        guard let recoveredTodayMove = model.moveTask(id: taskID, to: today) else {
+            preconditionFailure("a stale rendered row must not block overdue -> today")
+        }
+        precondition(calendar.isDate(recoveredTodayMove.sourceDate, inSameDayAs: yesterday))
+        precondition(calendar.isDate(recoveredTodayMove.targetDate, inSameDayAs: today))
+        precondition(model.activeTasks.map(\.id) == [taskID])
+        guard model.moveTask(id: taskID, to: yesterday) != nil else {
+            preconditionFailure("the same live task must remain movable after returning to today")
+        }
 
         let movedReminder = model.task(id: taskID)?.metadata.reminderAt
         precondition(movedReminder.map { calendar.isDate($0, inSameDayAs: yesterday) } == true)
@@ -65,7 +103,8 @@ struct V5TaskDateMovementAdversarial {
                      "revealing an animation target month must not rewrite task selection early")
 
         let mutationCountBeforeSameDay = mutations
-        model.moveTask(id: taskID, to: yesterday)
+        let duplicateMove = model.moveTask(id: taskID, to: yesterday)
+        precondition(duplicateMove == nil)
         precondition(mutations == mutationCountBeforeSameDay,
                      "same-day move must not emit a duplicate persistence mutation")
 

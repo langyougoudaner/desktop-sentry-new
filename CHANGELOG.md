@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.5 build 25 — continuous calendar motion and clear completion feedback
+
+- Replaced month-view swapping with a shared chronological week rail that scrolls vertically between adjacent months.
+- Preserved the preferred day across repeated month changes and queued rapid keyboard or button navigation in order.
+- Kept year, Today, month-navigation, and appearance controls visually active while the calendar is moving.
+- Unified the 12-year and 12-month chooser layouts and retained date-style hover and selection feedback.
+- Added an in-place checkmark, strike-through, blue acknowledgement, and stable fold-away animation for same-day completion and restore.
+- Preserved the orange return-to-date flight for overdue tasks surfaced on Today while preventing premature list reflow.
+- Hid the global overdue section outside Today so historical and future date pages show only their own tasks.
+
 ## 2.0.4 build 24 — overdue workflow and stable calendar interactions
 
 - Surfaced overdue tasks on today's page and recent completed tasks inline on each day.
