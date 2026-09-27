@@ -43,6 +43,8 @@ compile_and_run date-movement-adversarial \
     Sources/Models/V5TaskReminderPlanner.swift Sources/Models/CalendarWorkbenchV5Model.swift \
     Tests/V5TaskDateMovementAdversarial/main.swift
 
+python3 Tests/V5TaskDateRenderingSmoke/check.py
+
 compile_and_run calendar-model \
     -framework Combine \
     Sources/Models/TaskItem.swift Sources/Models/V5WorkbenchPresentation.swift \

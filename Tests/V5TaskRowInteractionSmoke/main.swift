@@ -13,9 +13,8 @@ struct V5TaskRowInteractionSmoke {
         let firstSession = UUID()
         let secondSession = UUID()
         var lifecycle = V5TaskCompletionLifecycle()
-        precondition(lifecycle.begin(sessionID: firstSession, taskID: firstTask)?.taskID == firstTask,
-                     "the completion command must be returned at interaction start")
-        precondition(lifecycle.begin(sessionID: secondSession, taskID: secondTask)?.taskID == secondTask)
+        lifecycle.begin(sessionID: firstSession, taskID: firstTask)
+        lifecycle.begin(sessionID: secondSession, taskID: secondTask)
         precondition(lifecycle.arrive(sessionID: secondSession) == secondTask,
                      "one flight arriving must not force another flight to complete")
         precondition(lifecycle.arrive(sessionID: firstSession) == firstTask)

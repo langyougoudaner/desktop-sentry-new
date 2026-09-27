@@ -9,21 +9,21 @@
 A local-first macOS menu-bar utility that brings calendars, daily todos, overdue work,
 reusable prompts, and local AI Skill indexes into one quick-access workspace.
 
-Current source release: **2.0.5 build 25 · Calendar V5**.
+Current source release: **2.0.7 build 27 · Calendar V5**.
 
 Desktop Sentry is written in Swift and SwiftUI and requires no account or cloud service.
 Settings and the calendar footer display the version, build, and calendar generation;
 source previews also include their Git revision so bug reports can identify the exact binary.
 
-## What changed in 2.0.5
+## What changed in 2.0.7
 
-- **Continuous month motion:** dates now move along one chronological vertical rail instead of replacing one month view with another.
-- **Stable rapid navigation:** repeated button or keyboard input is handled in order while preserving the user's preferred day when possible.
-- **Persistent header controls:** year, Today, month arrows, and appearance controls no longer dim while the calendar is moving.
-- **Unified year and month chooser:** both surfaces use a consistent 3-by-4 layout with the calendar's hover and selection treatment.
-- **Visible same-day completion:** a task shows its completed state and blue acknowledgement before folding away in place.
-- **Accurate overdue ownership:** overdue work shown on Today still returns to its real date, while other date pages no longer repeat the global overdue section.
-- **Visible binary identity:** releases display `2.0.5 (25) · V5`; source previews additionally show their revision and preview status.
+- **Continuous completion motion:** when historical overdue work is completed from Today, the real card collapses and the completion state is written only after its ring reaches the original date; repeated complete and restore cycles use the same path.
+- **Immediate date consistency after a drag:** moving a card into the past updates its list ownership, date badge, and orange overdue treatment together when it lands.
+- **Editors follow the authoritative date:** opening a task after a drag shows its new date; an existing reminder follows that date while unsaved title and detail edits remain intact.
+- **Reused rows observe live task state:** a card resolves its current task by UUID so it cannot retain a stale date or color after being reused by SwiftUI.
+- **Stable date-badge animation:** a date change updates one text layer instead of overlapping the outgoing and incoming labels.
+- **Calendar V5 remains unchanged:** month rails, year/month choosers, panel dimensions, data formats, and card dragging retain the accepted baseline.
+- **Visible binary identity:** releases display `2.0.7 (27) · V5`; source previews additionally show their revision and preview status.
 
 ## Motion upgrade
 
@@ -31,7 +31,7 @@ Motion communicates where a task came from and where it belongs; it is not decor
 
 - A dragged card collapses into a small ring attached to the pointer, then lands directly on the target date without a false intermediate stop.
 - Completing a historical overdue task from today's page turns the card into an orange ring that returns to its actual due date.
-- Completing a task on its own date shows an in-place checkmark, strike-through, and blue acknowledgement before folding away; there is no spatially misleading flight.
+- Completing a task on its own date uses the native list transition and does not create a detached duplicate card.
 - Month changes scroll one shared chronological date rail vertically and do not use an opacity-based view replacement.
 - Changing a due date flips only the compact date badge while the containing card remains stable.
 - Selection restores the V5 deep-blue fill, in-place blue border, and soft glow. Landing feedback stays about two points beyond the card instead of expanding outward.

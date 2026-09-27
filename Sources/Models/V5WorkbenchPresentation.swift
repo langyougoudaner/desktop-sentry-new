@@ -254,6 +254,19 @@ enum V5TaskListAnimationPolicy {
     }
 }
 
+/// Geometry preferences are a setup signal, not an animation clock. Feeding
+/// moving frames back into the workbench state makes SwiftUI lay out the whole
+/// calendar and task list again on every rendered frame.
+enum V5MotionGeometryFeedbackPolicy {
+    static func acceptsUpdate(
+        isMonthTransitioning: Bool,
+        isTaskDragging: Bool,
+        hasCompletionMotion: Bool
+    ) -> Bool {
+        !isMonthTransitioning && !isTaskDragging && !hasCompletionMotion
+    }
+}
+
 enum V5CalendarDirectionalKey {
     case up
     case down
@@ -411,10 +424,11 @@ enum V5CalendarMonthRailPresentation {
     static let rowSpacing: CGFloat = 4
     static let rowPitch = rowHeight + rowSpacing
     static let viewportHeight: CGFloat = rowHeight * 6 + rowSpacing * 5
-    /// Give SwiftUI one display pass to install the shared rail at its source
-    /// offset before animating it. Without this separation both state writes
-    /// can be coalesced and the month appears to replace in place.
-    static let installationDelay: TimeInterval = 0.035
+    /// Setup and motion stay in separate main-loop transactions, but there is
+    /// no user-visible timer between them.
+    static let installationDelay: TimeInterval = 0
+    static let reportsLiveGeometryDuringTransition = false
+    static let compositesMovingRail = true
     static let usesOpacityReplacement = false
     static let headerControlOpacity = 1.0
 
@@ -674,120 +688,37 @@ enum V5ResolvedTaskDragGeometry {
 
 enum V5TaskDropAnimationTiming {
     static let absorbDuration = 0.16
-    static let modelCommitDelay = 0.0
+    static let modelCommitDelay = absorbDuration
 }
 
 enum V5TaskCompletionFlightPhase: Equatable {
     case card
-    case collapsing
-    case traveling
-}
-
-enum V5TaskLocalCompletionPhase: Equatable {
-    case card
-    case acknowledged
-    case collapsing
-}
-
-struct V5TaskLocalCompletionPresentation: Equatable {
-    let sourceSlotHeightScale: CGFloat
-    let cardScaleY: CGFloat
-    let cardOpacity: Double
-    let blueBloomOpacity: Double
-    let showsCompletedState: Bool
-
-    static func value(for phase: V5TaskLocalCompletionPhase) -> Self {
-        switch phase {
-        case .card:
-            return Self(
-                sourceSlotHeightScale: 1,
-                cardScaleY: 1,
-                cardOpacity: 1,
-                blueBloomOpacity: 0,
-                showsCompletedState: false
-            )
-        case .acknowledged:
-            return Self(
-                sourceSlotHeightScale: 1,
-                cardScaleY: 1,
-                cardOpacity: 1,
-                blueBloomOpacity: 0.24,
-                showsCompletedState: true
-            )
-        case .collapsing:
-            return Self(
-                sourceSlotHeightScale: 0,
-                cardScaleY: 0.18,
-                cardOpacity: 0,
-                blueBloomOpacity: 0,
-                showsCompletedState: true
-            )
-        }
-    }
-}
-
-enum V5TaskLocalCompletionTiming {
-    static let acknowledgementDuration = 0.16
-    static let holdDuration = 0.18
-    static let collapseDuration = 0.26
-    static let totalDuration = acknowledgementDuration + holdDuration + collapseDuration
-    static let reducedMotionDuration = 0.16
+    case orb
+    case arrived
 }
 
 struct V5TaskCompletionFlightGeometry: Equatable {
-    let shellCenter: CGPoint
-    let shellSize: CGSize
-    let shellCornerRadius: CGFloat
-    let shellFillOpacity: Double
-    let shellStrokeWidth: CGFloat
-    let contentScale: CGFloat
-    let contentOpacity: Double
+    let cardCenter: CGPoint
+    let cardScale: CGFloat
+    let cardOpacity: Double
+    let ringCenter: CGPoint
+    let ringDiameter: CGFloat
+    let ringOpacity: Double
 
     static func value(for phase: V5TaskCompletionFlightPhase,
                       sourceFrame: CGRect, sourceRing: CGPoint,
                       target: CGPoint) -> Self {
+        let cardCenter = CGPoint(x: sourceFrame.midX, y: sourceFrame.midY)
         switch phase {
         case .card:
-            return Self(
-                shellCenter: CGPoint(x: sourceFrame.midX, y: sourceFrame.midY),
-                shellSize: sourceFrame.size,
-                shellCornerRadius: 11,
-                shellFillOpacity: 1,
-                shellStrokeWidth: 1,
-                contentScale: 1,
-                contentOpacity: 1
-            )
-        case .collapsing:
-            return Self(
-                shellCenter: sourceRing,
-                shellSize: CGSize(width: 18, height: 18),
-                shellCornerRadius: 9,
-                shellFillOpacity: 0,
-                shellStrokeWidth: 2,
-                contentScale: 0.05,
-                contentOpacity: 0
-            )
-        case .traveling:
-            return Self(
-                shellCenter: target,
-                shellSize: CGSize(width: 7, height: 7),
-                shellCornerRadius: 3.5,
-                shellFillOpacity: 0,
-                shellStrokeWidth: 1.35,
-                contentScale: 0.05,
-                contentOpacity: 0
-            )
-        }
-    }
-}
-
-enum V5TaskCompletionSourceSlotPolicy {
-    static func holdsSlot(during phase: V5TaskCompletionFlightPhase) -> Bool {
-        switch phase {
-        case .card, .collapsing:
-            return true
-        case .traveling:
-            return false
+            return Self(cardCenter: cardCenter, cardScale: 1, cardOpacity: 1,
+                        ringCenter: sourceRing, ringDiameter: 20, ringOpacity: 0)
+        case .orb:
+            return Self(cardCenter: cardCenter, cardScale: 0.08, cardOpacity: 0,
+                        ringCenter: sourceRing, ringDiameter: 14, ringOpacity: 1)
+        case .arrived:
+            return Self(cardCenter: cardCenter, cardScale: 0.08, cardOpacity: 0,
+                        ringCenter: target, ringDiameter: 7, ringOpacity: 1)
         }
     }
 }
@@ -823,10 +754,9 @@ enum V5TaskCompletionTransition: Equatable {
 }
 
 enum V5TaskCompletionFlightTiming {
-    static let collapseStartDelay = 0.03
-    static let collapseDuration = 0.30
-    static let travelDuration = 0.46
-    static let totalDuration = collapseStartDelay + collapseDuration + travelDuration
+    static let collapseDuration = 0.18
+    static let travelDuration = 0.42
+    static let modelCommitDelay = collapseDuration + travelDuration
     static let reducedMotionCommitDelay = 0.10
 }
 
@@ -836,20 +766,13 @@ enum V5TaskCompletionAdmission {
     }
 }
 
-struct V5TaskCompletionStart: Equatable {
-    let taskID: UUID
-}
-
-/// Completion is a data command issued at interaction start. The lifecycle
-/// tracks only the independent visual flight so navigation or window teardown
-/// cannot undo, duplicate, or postpone the user's completed action.
+/// The completion mutation belongs to the arrival event, never to an unrelated
+/// navigation, focus, or window-lifecycle interruption.
 struct V5TaskCompletionLifecycle {
     private var tasksBySession: [UUID: UUID] = [:]
 
-    mutating func begin(sessionID: UUID, taskID: UUID) -> V5TaskCompletionStart? {
-        guard tasksBySession[sessionID] == nil else { return nil }
+    mutating func begin(sessionID: UUID, taskID: UUID) {
         tasksBySession[sessionID] = taskID
-        return V5TaskCompletionStart(taskID: taskID)
     }
 
     mutating func arrive(sessionID: UUID) -> UUID? {

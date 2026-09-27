@@ -22,6 +22,12 @@ struct V5TaskDateMovementAdversarial {
             metadata: [taskID: V5TaskMetadata(dueDate: today, reminderAt: reminder)]
         )
         let staleRowSnapshot = model.task(id: taskID)!
+        model.beginEditing(staleRowSnapshot)
+        var cachedDraft = model.editDraft(for: staleRowSnapshot)
+        cachedDraft.title = "未保存标题仍需保留"
+        cachedDraft.details = "拖动只应改写草稿中的日期"
+        model.storeEditDraft(cachedDraft, for: taskID)
+        model.endEditing()
         var mutations = 0
         model.onMutation = { _, _ in mutations += 1 }
 
@@ -35,6 +41,14 @@ struct V5TaskDateMovementAdversarial {
         precondition(model.task(id: taskID)?.metadata.dueDate.map {
             calendar.isDate($0, inSameDayAs: future)
         } == true)
+        let futureDraft = model.editDraft(for: model.task(id: taskID)!)
+        precondition(calendar.isDate(futureDraft.date, inSameDayAs: future),
+                     "a drag must update an already-cached editor date")
+        precondition(futureDraft.title == "未保存标题仍需保留" &&
+                     futureDraft.details == "拖动只应改写草稿中的日期",
+                     "synchronizing the dragged date must retain unrelated draft edits")
+        precondition(calendar.isDate(futureDraft.reminder, inSameDayAs: future),
+                     "a cached reminder must follow the dragged task date")
         precondition(model.activeTasks.map(\.id) == [taskID])
 
         guard let todayMove = model.moveTask(id: taskID, to: today) else {
@@ -58,6 +72,11 @@ struct V5TaskDateMovementAdversarial {
         precondition(model.activeTasks.isEmpty,
                      "the same overdue task must not also appear in today's section")
         precondition(model.taskCounts(on: yesterday).active == 1)
+        let overdueDraft = model.editDraft(for: model.task(id: taskID)!)
+        precondition(calendar.isDate(overdueDraft.date, inSameDayAs: yesterday),
+                     "opening the editor after backdating must show the reassigned date")
+        precondition(calendar.isDate(overdueDraft.reminder, inSameDayAs: yesterday),
+                     "the editor reminder must not retain the pre-drag day")
         let movedRow = V5TaskRowStatusPresentation.resolve(
             task: model.task(id: taskID)!,
             today: model.today,

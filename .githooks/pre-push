@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+remote_name="${1:-origin}"
+zero_sha="0000000000000000000000000000000000000000"
+outgoing_revisions=()
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [[ "$local_sha" == "$zero_sha" ]] && continue
+    if [[ "$remote_sha" == "$zero_sha" ]]; then
+        while IFS= read -r revision; do
+            [[ -n "$revision" ]] && outgoing_revisions+=("$revision")
+        done < <(git rev-list "$local_sha" --not --remotes="$remote_name")
+    else
+        while IFS= read -r revision; do
+            [[ -n "$revision" ]] && outgoing_revisions+=("$revision")
+        done < <(git rev-list "${remote_sha}..${local_sha}")
+    fi
+done
+
+exec "$repo_root/Tools/PrePushPrivacyCheck.sh" "${outgoing_revisions[@]}"

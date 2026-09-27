@@ -277,12 +277,17 @@ final class CalendarWorkbenchV5Model: ObservableObject {
         selectedTaskID = nil
     }
 
-    func beginEditing(_ task: CalendarWorkbenchV5Task) {
-        if editDrafts[task.id] == nil {
-            editDrafts[task.id] = makeEditDraft(for: task)
+    func beginEditing(id: UUID) {
+        guard let task = task(id: id) else { return }
+        if editDrafts[id] == nil {
+            editDrafts[id] = makeEditDraft(for: task)
         }
-        selectedTaskID = task.id
-        editingTaskID = task.id
+        selectedTaskID = id
+        editingTaskID = id
+    }
+
+    func beginEditing(_ task: CalendarWorkbenchV5Task) {
+        beginEditing(id: task.id)
     }
     func endEditing() { editingTaskID = nil }
 
@@ -398,6 +403,7 @@ final class CalendarWorkbenchV5Model: ObservableObject {
                 of: targetDate
             ) ?? reminder
         }
+        synchronizeEditDraft(id: id, with: targetDate)
         // A historical drop belongs in today's overdue overview immediately.
         // Today/future drops reveal the exact destination day.
         let shouldRevealInOverdueOverview = !tasks[index].legacy.isCompleted && targetDate < today
@@ -441,6 +447,20 @@ final class CalendarWorkbenchV5Model: ObservableObject {
             reminderEnabled: task.metadata.reminderAt != nil,
             reminder: task.metadata.reminderAt ?? V5TaskReminderPlanner.defaultReminder(forDueDate: date)
         )
+    }
+
+    private func synchronizeEditDraft(id: UUID, with date: Date) {
+        guard var draft = editDrafts[id] else { return }
+        let targetDate = calendar.startOfDay(for: date)
+        let reminderTime = calendar.dateComponents([.hour, .minute, .second], from: draft.reminder)
+        draft.date = targetDate
+        draft.reminder = calendar.date(
+            bySettingHour: reminderTime.hour ?? 9,
+            minute: reminderTime.minute ?? 0,
+            second: reminderTime.second ?? 0,
+            of: targetDate
+        ) ?? draft.reminder
+        editDrafts[id] = draft
     }
 
     private func matchesSelection(_ task: CalendarWorkbenchV5Task) -> Bool {

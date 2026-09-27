@@ -1,25 +1,11 @@
 import AppKit
 import SwiftUI
 
-enum V5TaskCompletionSourceSection: Equatable {
-    case overdue
-    case active
-    case completed
-}
-
-struct V5TaskCompletionSourceSlot: Equatable, Identifiable {
-    let id: UUID
-    let section: V5TaskCompletionSourceSection
-    let insertionIndex: Int
-    let height: CGFloat
-}
-
 struct CalendarWorkbenchV5Sidebar: View {
     @ObservedObject var model: CalendarWorkbenchV5Model
     let appearance: V5AppearancePreference
     let onSelectAppearance: (V5AppearancePreference) -> Void
-    let completingTaskIDs: Set<UUID>
-    let completionSourceSlot: V5TaskCompletionSourceSlot?
+    let completionPhases: [UUID: V5TaskCompletionFlightPhase]
     let taskInteractionLocked: Bool
     let revealedTaskID: UUID?
     let onToggleTask: (UUID) -> Void
@@ -95,39 +81,39 @@ struct CalendarWorkbenchV5Sidebar: View {
                     ScrollView(.vertical,
                                showsIndicators: V5TaskListOverflowPresentation.showsNativeScrollIndicator) {
                         LazyVStack(alignment: .leading, spacing: 8) {
-                            if !overdueListItems.isEmpty {
+                            if model.shouldShowOverdueSection {
                                 V5TaskSectionHeader(
                                     title: "逾期",
-                                    count: overdueListItems.count,
+                                    count: model.overdueTasks.count,
                                     symbolName: "exclamationmark.circle.fill",
                                     tint: .orange
                                 )
-                                ForEach(overdueListItems) { item in
-                                    listItem(item)
+                                ForEach(model.overdueTasks) { task in
+                                    taskRow(task)
                                 }
                             }
 
-                            if !activeListItems.isEmpty {
+                            if !model.activeTasks.isEmpty {
                                 V5TaskSectionHeader(
                                     title: model.isTodaySelected ? "今天的待办" : "待办",
-                                    count: activeListItems.count,
+                                    count: model.activeTasks.count,
                                     symbolName: "circle",
                                     tint: .secondary
                                 )
-                                ForEach(activeListItems) { item in
-                                    listItem(item)
+                                ForEach(model.activeTasks) { task in
+                                    taskRow(task)
                                 }
                             }
 
-                            if !completedListItems.isEmpty {
+                            if !model.completedTasks.isEmpty {
                                 V5TaskSectionHeader(
                                     title: model.isTodaySelected ? "今天已完成" : "已完成",
-                                    count: completedListItems.count,
+                                    count: model.completedTasks.count,
                                     symbolName: "checkmark.circle.fill",
                                     tint: .secondary
                                 )
-                                ForEach(completedListItems) { item in
-                                    listItem(item)
+                                ForEach(visibleCompletedTasks) { task in
+                                    taskRow(task)
                                 }
                                 if inlinePresentation.showsCompletedDisclosure {
                                     Button(inlinePresentation.completedDisclosureTitle) {
@@ -145,6 +131,7 @@ struct CalendarWorkbenchV5Sidebar: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, V5TaskListOverflowPresentation.contentVerticalInset)
                         .background(V5ScrollViewConfigurator())
+                        .animation(rowAnimation, value: visibleTaskIDs)
                     }
                     .scrollIndicators(.hidden)
                     .scrollClipDisabled(V5TaskListOverflowPresentation.disablesScrollClipping)
@@ -179,56 +166,24 @@ struct CalendarWorkbenchV5Sidebar: View {
         Array(model.completedTasks.prefix(inlinePresentation.visibleCompletedCount))
     }
 
-    private var overdueListItems: [V5TaskListItem] {
-        guard model.shouldShowOverdueSection else { return [] }
-        return listItems(model.overdueTasks, section: .overdue)
-    }
-
-    private var activeListItems: [V5TaskListItem] {
-        listItems(model.activeTasks, section: .active)
-    }
-
-    private var completedListItems: [V5TaskListItem] {
-        listItems(visibleCompletedTasks, section: .completed)
-    }
-
-    private func listItems(
-        _ tasks: [CalendarWorkbenchV5Task],
-        section: V5TaskCompletionSourceSection
-    ) -> [V5TaskListItem] {
-        var items = tasks
-            .filter { !completingTaskIDs.contains($0.id) }
-            .map(V5TaskListItem.task)
-        if let completionSourceSlot, completionSourceSlot.section == section {
-            items.insert(
-                .sourceSlot(completionSourceSlot),
-                at: min(max(0, completionSourceSlot.insertionIndex), items.count)
-            )
-        }
-        return items
-    }
-
     private var hasNoVisibleTasks: Bool {
-        overdueListItems.isEmpty && activeListItems.isEmpty && completedListItems.isEmpty
+        !model.shouldShowOverdueSection && model.activeTasks.isEmpty && model.completedTasks.isEmpty
     }
 
-    @ViewBuilder
-    private func listItem(_ item: V5TaskListItem) -> some View {
-        switch item {
-        case let .task(task):
-            taskRow(task)
-        case let .sourceSlot(slot):
-            Color.clear
-                .frame(maxWidth: .infinity)
-                .frame(height: slot.height)
-                .accessibilityHidden(true)
-        }
+    private var visibleTaskIDs: [String] {
+        let overdueIDs = model.shouldShowOverdueSection
+            ? model.overdueTasks.map { taskRowIdentity(for: $0) }
+            : []
+        return overdueIDs
+            + model.activeTasks.map { taskRowIdentity(for: $0) }
+            + visibleCompletedTasks.map { taskRowIdentity(for: $0) }
     }
 
-    private func taskRow(_ task: CalendarWorkbenchV5Task) -> some View {
-        V5QuietTaskRow(
-            task: task,
+    private func taskRow(_ renderedTask: CalendarWorkbenchV5Task) -> some View {
+        let task = model.task(id: renderedTask.id) ?? renderedTask
+        return V5QuietTaskRow(
             model: model,
+            taskID: task.id,
             isSelected: model.selectedTaskID == task.id,
             isLanding: revealedTaskID == task.id,
             reduceMotion: reduceMotion,
@@ -238,7 +193,7 @@ struct CalendarWorkbenchV5Sidebar: View {
             },
             onEdit: {
                 composerFocused = false
-                model.beginEditing(task)
+                model.beginEditing(id: task.id)
             },
             onToggle: {
                 composerFocused = false
@@ -261,6 +216,10 @@ struct CalendarWorkbenchV5Sidebar: View {
             onChanged: onTaskDragChanged,
             onEnded: onTaskDragEnded
         ))
+        .modifier(V5TaskCompletionSourceModifier(
+            phase: task.legacy.isCompleted ? nil : completionPhases[task.id],
+            reduceMotion: reduceMotion
+        ))
         .allowsHitTesting(!taskInteractionLocked)
         .background {
             GeometryReader { proxy in
@@ -275,7 +234,12 @@ struct CalendarWorkbenchV5Sidebar: View {
                 )
             }
         }
-        .id(V5TaskRowIdentity.value(taskID: task.id, isCompleted: task.legacy.isCompleted))
+        .id(taskRowIdentity(for: task))
+        .transition(rowTransition)
+    }
+
+    private func taskRowIdentity(for task: CalendarWorkbenchV5Task) -> String {
+        V5TaskRowIdentity.value(taskID: task.id, isCompleted: task.legacy.isCompleted)
     }
 
     private var header: some View {
@@ -358,19 +322,13 @@ struct CalendarWorkbenchV5Sidebar: View {
         reduceMotion ? .easeOut(duration: 0.1) : .interactiveSpring(response: 0.24, dampingFraction: 0.86)
     }
 
-}
-
-private enum V5TaskListItem: Identifiable {
-    case task(CalendarWorkbenchV5Task)
-    case sourceSlot(V5TaskCompletionSourceSlot)
-
-    var id: String {
-        switch self {
-        case let .task(task):
-            return "task-\(task.id.uuidString)"
-        case let .sourceSlot(slot):
-            return "completion-source-slot-\(slot.id.uuidString)"
-        }
+    private var rowTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .asymmetric(
+                insertion: .offset(y: -10).combined(with: .opacity),
+                removal: .scale(scale: 0.97, anchor: .top).combined(with: .opacity)
+            )
     }
 }
 
@@ -455,8 +413,8 @@ private struct V5QuietEmptyState: View {
 }
 
 private struct V5QuietTaskRow: View {
-    let task: CalendarWorkbenchV5Task
     @ObservedObject var model: CalendarWorkbenchV5Model
+    let taskID: UUID
     let isSelected: Bool
     let isLanding: Bool
     let reduceMotion: Bool
@@ -472,8 +430,20 @@ private struct V5QuietTaskRow: View {
     private let revealPresentation = V5TaskRowRevealPresentation.value
     private let selectionPresentation = V5TaskSelectionPresentation.value
 
+    @ViewBuilder
     var body: some View {
-        HStack(spacing: 10) {
+        if let task = model.task(id: taskID) {
+            content(for: task)
+        }
+    }
+
+    private func content(for task: CalendarWorkbenchV5Task) -> some View {
+        let status = V5TaskRowStatusPresentation.resolve(
+            task: task,
+            today: model.today,
+            calendar: model.calendar
+        )
+        return HStack(spacing: 10) {
             Button(action: onToggle) {
                 Image(systemName: task.legacy.isCompleted ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 18, weight: .medium))
@@ -500,8 +470,8 @@ private struct V5QuietTaskRow: View {
                 Button(action: onSelect) {
                     HStack(spacing: 7) {
                         V5TaskDateBadge(
-                            model: model,
-                            taskID: task.id,
+                            dateText: status.dateText,
+                            isOverdue: status.isOverdue,
                             colorScheme: colorScheme,
                             reduceMotion: reduceMotion
                         )
@@ -612,64 +582,112 @@ private struct V5QuietTaskRow: View {
 }
 
 private struct V5TaskDateBadge: View {
-    @ObservedObject var model: CalendarWorkbenchV5Model
-    let taskID: UUID
+    let dateText: String
+    let isOverdue: Bool
     let colorScheme: ColorScheme
     let reduceMotion: Bool
-    @State private var flipDegrees = 0.0
-    @State private var labelOpacity = 1.0
+
+    @State private var turnDegrees = 0.0
+    @State private var turnOpacity = 1.0
+    @State private var turnOffset: CGFloat = 0
+    @State private var turnToken = UUID()
 
     var body: some View {
-        let status = model.task(id: taskID).map {
-            V5TaskRowStatusPresentation.resolve(
-                task: $0,
-                today: model.today,
-                calendar: model.calendar
-            )
-        } ?? V5TaskRowStatusPresentation(dateText: "未排期", isOverdue: false)
-
         ZStack {
             Capsule()
                 .fill(
-                    (status.isOverdue ? Color.orange : Color.primary)
-                        .opacity(status.isOverdue
+                    (isOverdue ? Color.orange : Color.primary)
+                        .opacity(isOverdue
                                  ? (colorScheme == .dark ? 0.14 : 0.10)
                                  : (colorScheme == .dark ? 0.08 : 0.055))
                 )
-            Text(status.dateText)
+            Text(dateText)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(status.isOverdue ? Color.orange : Color.secondary)
-                .rotation3DEffect(
-                    .degrees(flipDegrees),
-                    axis: (x: 1, y: 0, z: 0),
-                    anchor: .bottom,
-                    perspective: V5TaskDateFlipPresentation.perspective
-                )
-                .opacity(labelOpacity)
-            .clipped()
+                .foregroundStyle(isOverdue ? Color.orange : Color.secondary)
+                .modifier(V5DatePageTurnModifier(
+                    degrees: turnDegrees,
+                    opacityValue: turnOpacity,
+                    verticalOffset: turnOffset
+                ))
+                .clipped()
         }
         .frame(width: 48, height: 20)
         .contentShape(Capsule())
         .compositingGroup()
-        .onChange(of: status.dateText) { _, _ in
-            var transaction = Transaction()
-            transaction.animation = nil
-            withTransaction(transaction) {
-                flipDegrees = reduceMotion ? 0 : -V5TaskDateFlipPresentation.tiltDegrees
-                labelOpacity = reduceMotion ? 0.45 : 0.30
-            }
-            DispatchQueue.main.async {
-                withAnimation(
-                    reduceMotion
-                        ? .easeOut(duration: V5TaskDateFlipPresentation.reducedMotionDuration)
-                        : .timingCurve(0.20, 0.72, 0.24, 1,
-                                       duration: V5TaskDateFlipPresentation.duration)
-                ) {
-                    flipDegrees = 0
-                    labelOpacity = 1
-                }
+        .onChange(of: dateText) { _, _ in animateLatestDate() }
+    }
+
+    private func animateLatestDate() {
+        let token = UUID()
+        var reset = Transaction(animation: nil)
+        reset.disablesAnimations = true
+        withTransaction(reset) {
+            turnToken = token
+            turnDegrees = reduceMotion ? 0 : -V5TaskDateFlipPresentation.tiltDegrees
+            turnOpacity = reduceMotion ? 0.30 : 0
+            turnOffset = reduceMotion ? 0 : 2
+        }
+        DispatchQueue.main.async {
+            guard turnToken == token else { return }
+            withAnimation(
+                reduceMotion
+                    ? .easeOut(duration: V5TaskDateFlipPresentation.reducedMotionDuration)
+                    : .timingCurve(0.20, 0.72, 0.24, 1,
+                                   duration: V5TaskDateFlipPresentation.duration)
+            ) {
+                turnDegrees = 0
+                turnOpacity = 1
+                turnOffset = 0
             }
         }
+    }
+}
+
+private struct V5DatePageTurnModifier: AnimatableModifier {
+    var degrees: Double
+    var opacityValue: Double
+    var verticalOffset: CGFloat
+
+    var animatableData: AnimatablePair<Double, AnimatablePair<Double, CGFloat>> {
+        get { AnimatablePair(degrees, AnimatablePair(opacityValue, verticalOffset)) }
+        set {
+            degrees = newValue.first
+            opacityValue = newValue.second.first
+            verticalOffset = newValue.second.second
+        }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .rotation3DEffect(
+                .degrees(degrees),
+                axis: (x: 1, y: 0, z: 0),
+                anchor: degrees < 0 ? .bottom : .top,
+                perspective: V5TaskDateFlipPresentation.perspective
+            )
+            .offset(y: verticalOffset)
+            .opacity(opacityValue)
+    }
+}
+
+/// The actual row owns the collapse; the workbench overlay owns only the ring.
+private struct V5TaskCompletionSourceModifier: ViewModifier {
+    let phase: V5TaskCompletionFlightPhase?
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        let collapsed = phase == .orb || phase == .arrived
+        content
+            .visualEffect { view, geometry in
+                view
+                    .scaleEffect(collapsed ? 0.08 : 1,
+                                 anchor: UnitPoint(x: 22 / max(geometry.size.width, 1), y: 0.5))
+                    .opacity(collapsed ? 0 : 1)
+            }
+            .animation(.easeInOut(duration: reduceMotion
+                                 ? V5TaskCompletionFlightTiming.reducedMotionCommitDelay
+                                 : V5TaskCompletionFlightTiming.collapseDuration),
+                       value: collapsed)
     }
 }
 
@@ -689,10 +707,7 @@ private struct V5TaskDragModifier: ViewModifier {
                         .interactiveSpring(response: 0.28, dampingFraction: 0.84),
                        value: isGestureActive)
             .simultaneousGesture(
-                DragGesture(
-                    minimumDistance: V5TaskDragGesturePolicy.minimumDistance,
-                    coordinateSpace: .named("v5-workbench")
-                )
+                DragGesture(minimumDistance: 8, coordinateSpace: .named("v5-workbench"))
                     .updating($isGestureActive) { _, isGestureActive, _ in
                         isGestureActive = true
                     }

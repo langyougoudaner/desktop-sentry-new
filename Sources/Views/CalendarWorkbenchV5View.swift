@@ -32,10 +32,9 @@ struct CalendarWorkbenchV5View: View {
     @State private var dayFrames: [Date: CGRect] = [:]
     @State private var dragWorkbenchPoints = V5DragWorkbenchPoints()
     @State private var taskDrag: V5TaskDragSession?
-    @State private var activeDropTargetDate: Date?
     @State private var completionFlights: [UUID: V5TaskCompletionFlightSession] = [:]
-    @State private var localCompletions: [UUID: V5TaskLocalCompletionSession] = [:]
     @State private var completionLifecycle = V5TaskCompletionLifecycle()
+    @State private var departingCompletionTasks: [UUID: UUID] = [:]
     @State private var pendingCompletion: V5PendingTaskCompletion?
     @State private var dropPulseDates: Set<Date> = []
     @State private var revealedTaskID: UUID?
@@ -77,8 +76,12 @@ struct CalendarWorkbenchV5View: View {
             )
             .frame(width: 0, height: 0)
         }
-        .onPreferenceChange(V5DayFramePreferenceKey.self) { dayFrames = $0 }
+        .onPreferenceChange(V5DayFramePreferenceKey.self) { frames in
+            guard acceptsMotionGeometryFeedback else { return }
+            dayFrames = frames
+        }
         .onPreferenceChange(V5DragWorkbenchPointsPreferenceKey.self) { points in
+            guard acceptsMotionGeometryFeedback else { return }
             dragWorkbenchPoints = points
             startPendingCompletionIfPossible(using: points)
         }
@@ -105,9 +108,6 @@ struct CalendarWorkbenchV5View: View {
                 ForEach(Array(completionFlights.values), id: \.id) { flight in
                     V5TaskCompletionFlightView(session: flight)
                 }
-                ForEach(Array(localCompletions.values), id: \.id) { completion in
-                    V5TaskLocalCompletionView(session: completion)
-                }
             }
             .allowsHitTesting(false)
         }
@@ -120,10 +120,8 @@ struct CalendarWorkbenchV5View: View {
         .onChange(of: model.selectedDate) { _, _ in
             _ = completionLifecycle.navigate()
             completionFlights.removeAll()
-            localCompletions.removeAll()
             pendingCompletion = nil
             dropPulseDates.removeAll()
-            setActiveDropTargetDate(nil)
             if taskDrag?.phase != .absorbing {
                 cancelTaskDrag()
             }
@@ -139,14 +137,12 @@ struct CalendarWorkbenchV5View: View {
             pendingCompletion = nil
             _ = completionLifecycle.calendarChanged()
             completionFlights.removeAll()
-            localCompletions.removeAll()
             dropPulseDates.removeAll()
         }
         .onChange(of: controlActiveState) { _, state in
             if state == .inactive {
                 _ = completionLifecycle.cancelAll()
                 completionFlights.removeAll()
-                localCompletions.removeAll()
                 pendingCompletion = nil
                 dropPulseDates.removeAll()
                 cancelTaskDrag()
@@ -155,7 +151,6 @@ struct CalendarWorkbenchV5View: View {
         .onDisappear {
             _ = completionLifecycle.cancelAll()
             completionFlights.removeAll()
-            localCompletions.removeAll()
             pendingCompletion = nil
             dropPulseDates.removeAll()
             cancelTaskDrag()
@@ -276,18 +271,22 @@ struct CalendarWorkbenchV5View: View {
                         taskCounts: taskCounts,
                         reduceMotion: reduceMotion,
                         isDraggingTask: taskDrag != nil,
-                        isDropTarget: activeDropTargetDate.map {
+                        isDropTarget: taskDrag?.targetDate.map {
                             model.calendar.isDate($0, inSameDayAs: date)
                         } == true,
                         isDropArrival: dropPulseDates.contains { pulseDate in
                             model.calendar.isDate(pulseDate, inSameDayAs: date)
-                        }
+                        },
+                        reportsGeometry: monthRailPlan == nil
+                            || V5CalendarMonthRailPresentation.reportsLiveGeometryDuringTransition
                     ) {
                         selectDate(date)
                     }
+                    .equatable()
                     .accessibilityIdentifier("v5-day-\(index)")
                 }
             }
+            .compositingGroup()
             .offset(y: monthRailOffsetY)
         }
         .frame(height: V5CalendarMonthRailPresentation.viewportHeight, alignment: .top)
@@ -433,10 +432,8 @@ struct CalendarWorkbenchV5View: View {
             model: model,
             appearance: visualAppearance ?? appearance,
             onSelectAppearance: selectAppearance,
-            completingTaskIDs: Set(completionFlights.values.map(\.taskID))
-                .union(localCompletions.values.map(\.taskID)),
-            completionSourceSlot: taskCompletionSourceSlot,
-            taskInteractionLocked: false,
+            completionPhases: completionSourcePhases,
+            taskInteractionLocked: !canBeginTaskCompletion,
             revealedTaskID: revealedTaskID,
             onToggleTask: beginTaskCompletion,
             onTaskDragChanged: updateTaskDrag,
@@ -469,10 +466,12 @@ struct CalendarWorkbenchV5View: View {
         // Calendar coordinates belong to one spatial transaction at a time.
         // Starting another completion while a flight is active could move the
         // visible month underneath the first flight and invalidate its target.
-        guard canBeginTaskCompletion,
-              let task = model.task(id: taskID) else { return }
+        guard canBeginTaskCompletion, let task = model.task(id: taskID) else { return }
         if task.legacy.isCompleted {
-            beginLocalTaskCompletion(task, completed: false)
+            departingCompletionTasks.removeValue(forKey: task.id)
+            withAnimation(rowMutationAnimation) {
+                _ = model.setCompletion(id: task.id, completed: false)
+            }
             return
         }
         let transition = V5TaskCompletionTransition.resolve(
@@ -482,181 +481,31 @@ struct CalendarWorkbenchV5View: View {
             calendar: model.calendar
         )
         if transition == .inline {
-            beginLocalTaskCompletion(task, completed: true)
-            return
-        }
-        guard pendingCompletion?.task.id != task.id else { return }
-        guard let dueDate = task.metadata.dueDate else { return }
-        guard let sourceFrame = dragWorkbenchPoints.taskFrames[task.id] else {
-            // Geometry is presentation state. A missing preference update must
-            // never turn a valid completion click into a no-op.
-            performTaskListMutation(for: .taskCompletionChanged) {
-                model.setCompletion(id: task.id, completed: true)
+            withAnimation(rowMutationAnimation) {
+                _ = model.setCompletion(id: task.id, completed: true)
             }
             return
         }
+        guard pendingCompletion?.task.id != task.id else { return }
+        guard let sourceFrame = dragWorkbenchPoints.taskFrames[task.id],
+              let dueDate = task.metadata.dueDate else { return }
         let sourceRing = dragWorkbenchPoints.taskSources[task.id]
             ?? CGPoint(x: sourceFrame.minX + 22, y: sourceFrame.midY)
-        let sourceIndex = model.overdueTasks.firstIndex(where: { $0.id == task.id }) ?? 0
-        let sessionID = UUID()
         let pending = V5PendingTaskCompletion(
-            id: sessionID,
             task: task,
-            sourceIndex: sourceIndex,
             sourceFrame: sourceFrame,
             sourceRingPoint: sourceRing
         )
-        guard let start = completionLifecycle.begin(
-            sessionID: sessionID,
-            taskID: task.id
-        ) else { return }
-        model.clearTaskSelection()
-
-        let targetPoint = indicatorPoint(for: dueDate, in: dragWorkbenchPoints)
-        if targetPoint == nil {
-            // Keep the captured source geometry while the real destination
-            // month is revealed. The data change below is still immediate.
-            pendingCompletion = pending
-        }
-
-        var completionResult: V5TaskCompletionResult?
-        performTaskListMutation(for: .taskCompletionChanged) {
-            completionResult = model.setCompletion(id: start.taskID, completed: true)
-        }
-        guard completionResult != nil else {
-            pendingCompletion = nil
-            _ = completionLifecycle.arrive(sessionID: sessionID)
-            return
-        }
-
-        if let targetPoint {
+        if let targetPoint = indicatorPoint(for: dueDate, in: dragWorkbenchPoints) {
             startTaskCompletion(pending, targetPoint: targetPoint)
             return
         }
 
-        // The real calendar cell is the only legal visual destination. Reveal
-        // its month after completion has already become durable model state.
+        // The real calendar cell is the only legal destination. Reveal its
+        // month and let the next geometry preference update start the flight.
+        pendingCompletion = pending
         withAnimation(reduceMotion ? .easeOut(duration: 0.08) : .easeInOut(duration: 0.16)) {
             model.revealMonth(containing: dueDate)
-        }
-    }
-
-    private func beginLocalTaskCompletion(
-        _ task: CalendarWorkbenchV5Task,
-        completed: Bool
-    ) {
-        guard let sourceFrame = dragWorkbenchPoints.taskFrames[task.id] else {
-            performTaskListMutation(for: .taskCompletionChanged) {
-                model.setCompletion(id: task.id, completed: completed)
-            }
-            return
-        }
-        let sourceRing = dragWorkbenchPoints.taskSources[task.id]
-            ?? CGPoint(x: sourceFrame.minX + 22, y: sourceFrame.midY)
-        let sourceSection: V5TaskCompletionSourceSection
-        let sourceIndex: Int
-        if task.legacy.isCompleted {
-            sourceSection = .completed
-            sourceIndex = model.completedTasks.firstIndex(where: { $0.id == task.id }) ?? 0
-        } else if model.shouldShowOverdueSection,
-                  model.overdueTasks.contains(where: { $0.id == task.id }) {
-            sourceSection = .overdue
-            sourceIndex = model.overdueTasks.firstIndex(where: { $0.id == task.id }) ?? 0
-        } else {
-            sourceSection = .active
-            sourceIndex = model.activeTasks.firstIndex(where: { $0.id == task.id }) ?? 0
-        }
-
-        let sessionID = UUID()
-        guard let start = completionLifecycle.begin(
-            sessionID: sessionID,
-            taskID: task.id
-        ) else { return }
-        model.clearTaskSelection()
-        localCompletions[sessionID] = V5TaskLocalCompletionSession(
-            id: sessionID,
-            taskID: task.id,
-            title: task.legacy.title,
-            dateText: task.metadata.dueDate.map(shortDate) ?? "未排期",
-            sourceSection: sourceSection,
-            sourceIndex: sourceIndex,
-            sourceFrame: sourceFrame,
-            sourceRingPoint: sourceRing,
-            becomesCompleted: completed,
-            wasCompleted: task.legacy.isCompleted,
-            wasOverdue: task.metadata.dueDate.map {
-                !task.legacy.isCompleted
-                    && model.calendar.startOfDay(for: $0) < model.today
-            } ?? false,
-            phase: .card
-        )
-
-        var completionResult: V5TaskCompletionResult?
-        performTaskListMutation(for: .taskCompletionChanged) {
-            completionResult = model.setCompletion(
-                id: start.taskID,
-                completed: completed
-            )
-        }
-        guard completionResult != nil else {
-            localCompletions.removeValue(forKey: sessionID)
-            _ = completionLifecycle.arrive(sessionID: sessionID)
-            return
-        }
-
-        if reduceMotion {
-            withAnimation(.easeOut(duration: 0.08)) {
-                localCompletions[sessionID]?.phase = .acknowledged
-            }
-            DispatchQueue.main.asyncAfter(
-                deadline: .now() + V5TaskLocalCompletionTiming.reducedMotionDuration
-            ) {
-                guard localCompletions[sessionID] != nil else { return }
-                withAnimation(.easeOut(duration: 0.08)) {
-                    localCompletions[sessionID]?.phase = .collapsing
-                }
-            }
-            DispatchQueue.main.asyncAfter(
-                deadline: .now() + V5TaskLocalCompletionTiming.reducedMotionDuration + 0.08
-            ) { finishLocalTaskCompletion(sessionID) }
-            return
-        }
-
-        DispatchQueue.main.async {
-            guard localCompletions[sessionID] != nil else { return }
-            withAnimation(.easeOut(
-                duration: V5TaskLocalCompletionTiming.acknowledgementDuration
-            )) {
-                localCompletions[sessionID]?.phase = .acknowledged
-            }
-        }
-        DispatchQueue.main.asyncAfter(
-            deadline: .now()
-                + V5TaskLocalCompletionTiming.acknowledgementDuration
-                + V5TaskLocalCompletionTiming.holdDuration
-        ) {
-            guard localCompletions[sessionID] != nil else { return }
-            withAnimation(.timingCurve(
-                0.32, 0.72, 0, 1,
-                duration: V5TaskLocalCompletionTiming.collapseDuration
-            )) {
-                localCompletions[sessionID]?.phase = .collapsing
-            }
-        }
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + V5TaskLocalCompletionTiming.totalDuration
-        ) { finishLocalTaskCompletion(sessionID) }
-    }
-
-    private func finishLocalTaskCompletion(_ sessionID: UUID) {
-        guard let taskID = completionLifecycle.arrive(sessionID: sessionID),
-              let completion = localCompletions[sessionID],
-              completion.taskID == taskID else { return }
-        var transaction = Transaction()
-        transaction.animation = nil
-        transaction.disablesAnimations = true
-        _ = withTransaction(transaction) {
-            localCompletions.removeValue(forKey: sessionID)
         }
     }
 
@@ -682,9 +531,8 @@ struct CalendarWorkbenchV5View: View {
         guard let dueDate = task.metadata.dueDate else { return }
 
         let flight = V5TaskCompletionFlightSession(
-            id: pending.id, taskID: task.id, title: task.legacy.title,
+            id: UUID(), taskID: task.id, title: task.legacy.title,
             dateText: shortDate(dueDate),
-            sourceIndex: pending.sourceIndex,
             sourceFrame: pending.sourceFrame,
             sourceRingPoint: pending.sourceRingPoint,
             targetPoint: targetPoint,
@@ -694,11 +542,13 @@ struct CalendarWorkbenchV5View: View {
             ),
             phase: .card
         )
+        model.clearTaskSelection()
+        completionLifecycle.begin(sessionID: flight.id, taskID: task.id)
         completionFlights[flight.id] = flight
 
         if reduceMotion {
             withAnimation(.easeOut(duration: V5TaskCompletionFlightTiming.reducedMotionCommitDelay)) {
-                completionFlights[flight.id]?.phase = .collapsing
+                completionFlights[flight.id]?.phase = .orb
             }
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + V5TaskCompletionFlightTiming.reducedMotionCommitDelay
@@ -706,31 +556,25 @@ struct CalendarWorkbenchV5View: View {
             return
         }
 
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + V5TaskCompletionFlightTiming.collapseStartDelay
-        ) {
+        DispatchQueue.main.async {
             guard completionFlights[flight.id] != nil else { return }
-            withAnimation(.timingCurve(
-                0.22, 0.74, 0.24, 1,
-                duration: V5TaskCompletionFlightTiming.collapseDuration
-            )) {
-                completionFlights[flight.id]?.phase = .collapsing
+            withAnimation(.easeInOut(duration: V5TaskCompletionFlightTiming.collapseDuration)) {
+                completionFlights[flight.id]?.phase = .orb
             }
         }
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + V5TaskCompletionFlightTiming.collapseStartDelay
-                + V5TaskCompletionFlightTiming.collapseDuration
+            deadline: .now() + V5TaskCompletionFlightTiming.collapseDuration
         ) {
             guard completionFlights[flight.id] != nil else { return }
             withAnimation(.timingCurve(
                 0.22, 0.61, 0.36, 1,
                 duration: V5TaskCompletionFlightTiming.travelDuration
             )) {
-                completionFlights[flight.id]?.phase = .traveling
+                completionFlights[flight.id]?.phase = .arrived
             }
         }
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + V5TaskCompletionFlightTiming.totalDuration
+            deadline: .now() + V5TaskCompletionFlightTiming.modelCommitDelay
         ) { finishTaskCompletion(flight.id) }
     }
 
@@ -738,72 +582,55 @@ struct CalendarWorkbenchV5View: View {
         guard let taskID = completionLifecycle.arrive(sessionID: sessionID),
               let flight = completionFlights.removeValue(forKey: sessionID),
               taskID == flight.taskID else { return }
+        // Keep the departing source collapsed while SwiftUI removes its row.
+        departingCompletionTasks[taskID] = sessionID
         withAnimation(.easeOut(duration: 0.12)) {
             _ = dropPulseDates.insert(flight.targetDate)
+        }
+        withAnimation(rowMutationAnimation) {
+            _ = model.setCompletion(id: taskID, completed: true)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            if departingCompletionTasks[taskID] == sessionID {
+                departingCompletionTasks.removeValue(forKey: taskID)
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
             withAnimation(.easeOut(duration: 0.12)) { _ = dropPulseDates.remove(flight.targetDate) }
         }
     }
 
+    private var completionSourcePhases: [UUID: V5TaskCompletionFlightPhase] {
+        var phases = departingCompletionTasks.mapValues { _ in V5TaskCompletionFlightPhase.arrived }
+        for flight in completionFlights.values { phases[flight.taskID] = flight.phase }
+        return phases
+    }
+
+    private var rowMutationAnimation: Animation {
+        reduceMotion ? .easeOut(duration: 0.08) : .interactiveSpring(response: 0.30, dampingFraction: 0.88)
+    }
+
     private var canBeginTaskCompletion: Bool {
         V5TaskCompletionAdmission.canBegin(
-            hasActiveFlight: !completionFlights.isEmpty || !localCompletions.isEmpty,
+            hasActiveFlight: !completionFlights.isEmpty,
             hasPendingTarget: pendingCompletion != nil
         )
     }
 
-    private var taskCompletionSourceSlot: V5TaskCompletionSourceSlot? {
-        if let completion = localCompletions.values.first {
-            let presentation = V5TaskLocalCompletionPresentation.value(
-                for: completion.phase
-            )
-            return V5TaskCompletionSourceSlot(
-                id: completion.id,
-                section: completion.sourceSection,
-                insertionIndex: completion.sourceIndex,
-                height: completion.sourceFrame.height * presentation.sourceSlotHeightScale
-            )
-        }
-        if let pendingCompletion {
-            return V5TaskCompletionSourceSlot(
-                id: pendingCompletion.id,
-                section: .overdue,
-                insertionIndex: pendingCompletion.sourceIndex,
-                height: pendingCompletion.sourceFrame.height
-            )
-        }
-        guard let flight = completionFlights.values.first(where: {
-            V5TaskCompletionSourceSlotPolicy.holdsSlot(during: $0.phase)
-        }) else { return nil }
-        return V5TaskCompletionSourceSlot(
-            id: flight.id,
-            section: .overdue,
-            insertionIndex: flight.sourceIndex,
-            height: flight.sourceFrame.height
-        )
-    }
-
     private func updateTaskDrag(_ taskID: UUID,
-                                location: CGPoint, startLocation: CGPoint) {
-        _ = startLocation
-        guard canBeginTaskCompletion,
-              !isMonthTransitioning,
-              model.task(id: taskID) != nil else {
-            cancelTaskDrag()
-            return
-        }
+                                location: CGPoint, startLocation _: CGPoint) {
+        guard let task = model.task(id: taskID) else { return }
         let targetDate = permittedDropDate(for: taskID, at: location)
         let phase: V5TaskDragPhase = targetDate == nil ? .dragging : .targeted
 
-        if taskDrag?.taskID != taskID {
-            guard let sourcePoint = dragWorkbenchPoints.taskSources[taskID] else {
+        if taskDrag?.taskID != task.id {
+            guard let sourcePoint = dragWorkbenchPoints.taskSources[task.id] else {
                 return
             }
-            setActiveDropTargetDate(targetDate)
             let sessionID = UUID()
             taskDrag = V5TaskDragSession(
-                id: sessionID, taskID: taskID,
+                id: sessionID, taskID: task.id,
+                sourceDate: task.metadata.dueDate,
                 sourcePoint: sourcePoint, location: location,
                 targetDate: targetDate, targetPoint: nil, phase: .launching
             )
@@ -824,7 +651,6 @@ struct CalendarWorkbenchV5View: View {
             return
         }
 
-        setActiveDropTargetDate(targetDate)
         if taskDrag?.phase == .launching || taskDrag?.phase == .catching {
             withAnimation(catchSpring) {
                 taskDrag?.location = location
@@ -835,23 +661,24 @@ struct CalendarWorkbenchV5View: View {
 
         taskDrag?.location = location
         if taskDrag?.targetDate != targetDate || taskDrag?.phase != phase {
-            taskDrag?.targetDate = targetDate
-            taskDrag?.phase = phase
+            withAnimation(dragSpring) {
+                taskDrag?.targetDate = targetDate
+                taskDrag?.phase = phase
+            }
         }
     }
 
     private func finishTaskDrag(_ taskID: UUID, location: CGPoint) {
-        guard var session = taskDrag, session.taskID == taskID else {
-            setActiveDropTargetDate(nil)
-            return
-        }
+        guard var session = taskDrag, session.taskID == taskID else { return }
         let targetDate = V5TaskDropCommitPolicy.resolvedTarget(
             atRelease: permittedDropDate(for: taskID, at: location)
         )
+        let isSameDay = targetDate.flatMap { target in
+            session.sourceDate.map { model.calendar.isDate($0, inSameDayAs: target) }
+        } == true
 
-        guard let targetDate, dayFrames[targetDate] != nil,
+        guard let targetDate, dayFrames[targetDate] != nil, !isSameDay,
               let targetPoint = dragWorkbenchPoints.dayIndicators[targetDate] else {
-            setActiveDropTargetDate(nil)
             session.phase = .returning
             session.targetDate = nil
             session.targetPoint = nil
@@ -864,35 +691,24 @@ struct CalendarWorkbenchV5View: View {
         session.targetDate = targetDate
         session.targetPoint = targetPoint
         withAnimation(absorbAnimation) { taskDrag = session }
-        setActiveDropTargetDate(nil)
 
-        // The model resolves this command against its live task, not the value
-        // snapshot retained by the SwiftUI row that began the gesture.
-        var moveResult: V5TaskDateMoveResult?
-        performTaskListMutation(for: .taskDateMoved) {
-            moveResult = model.moveTask(id: taskID, to: targetDate)
-        }
-        guard moveResult != nil else {
-            session.phase = .returning
-            session.targetDate = nil
-            session.targetPoint = nil
-            withAnimation(dragSpring) { taskDrag = session }
-            clearDragSession(session.id, after: reduceMotion ? 0.08 : 0.22)
-            return
-        }
-
-        let settleDelay = reduceMotion ? 0.06 : V5TaskDropAnimationTiming.absorbDuration
+        let settleDelay = reduceMotion ? 0.06 : V5TaskDropAnimationTiming.modelCommitDelay
         DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
             guard taskDrag?.id == session.id else { return }
-            taskDrag = nil
+            performTaskListMutation(for: .taskDateMoved) {
+                taskDrag = nil
+                _ = model.moveTask(id: taskID, to: targetDate)
+            }
+            // Let the authoritative task snapshot render before applying the
+            // local landing bloom, so that animation cannot retain the source row.
             DispatchQueue.main.async {
                 withAnimation(revealSpring) {
                     revealedTaskID = taskID
                 }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + (reduceMotion ? 0.18 : 0.72)) {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    if revealedTaskID == taskID { revealedTaskID = nil }
+                DispatchQueue.main.asyncAfter(deadline: .now() + (reduceMotion ? 0.18 : 0.72)) {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        if revealedTaskID == taskID { revealedTaskID = nil }
+                    }
                 }
             }
         }
@@ -914,27 +730,6 @@ struct CalendarWorkbenchV5View: View {
 
     private func cancelTaskDrag() {
         taskDrag = nil
-        setActiveDropTargetDate(nil)
-    }
-
-    private func setActiveDropTargetDate(_ date: Date?) {
-        var transaction = Transaction()
-        transaction.animation = nil
-        withTransaction(transaction) {
-            activeDropTargetDate = date
-        }
-    }
-
-    private func performTaskListMutation(
-        for cause: V5TaskListMutationCause,
-        _ mutation: () -> Void
-    ) {
-        var transaction = Transaction()
-        if !V5TaskListAnimationPolicy.animatesWholeList(for: cause) {
-            transaction.animation = nil
-            transaction.disablesAnimations = true
-        }
-        withTransaction(transaction, mutation)
     }
 
     private var dragSpring: Animation {
@@ -951,6 +746,26 @@ struct CalendarWorkbenchV5View: View {
 
     private var revealSpring: Animation {
         reduceMotion ? .easeOut(duration: 0.1) : .interactiveSpring(response: 0.32, dampingFraction: 0.82)
+    }
+
+    private func performTaskListMutation(
+        for cause: V5TaskListMutationCause,
+        _ mutation: () -> Void
+    ) {
+        var transaction = Transaction()
+        if !V5TaskListAnimationPolicy.animatesWholeList(for: cause) {
+            transaction.animation = nil
+            transaction.disablesAnimations = true
+        }
+        withTransaction(transaction, mutation)
+    }
+
+    private var acceptsMotionGeometryFeedback: Bool {
+        V5MotionGeometryFeedbackPolicy.acceptsUpdate(
+            isMonthTransitioning: isMonthTransitioning,
+            isTaskDragging: taskDrag != nil,
+            hasCompletionMotion: !completionFlights.isEmpty
+        )
     }
 
     private var appearance: V5AppearancePreference {
@@ -1199,9 +1014,7 @@ struct CalendarWorkbenchV5View: View {
         let duration = reduceMotion
             ? 0.12
             : V5CalendarMonthRailPresentation.duration(forWeekDistance: plan.weekDistance)
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + V5CalendarMonthRailPresentation.installationDelay
-        ) {
+        DispatchQueue.main.async {
             guard monthTransitionToken == token else { return }
             withAnimation(monthRailAnimation(forWeekDistance: plan.weekDistance)) {
                 monthRailOffsetY = plan.targetOffsetY
@@ -1573,7 +1386,7 @@ private struct V5CalendarChoiceCell: View {
     }
 }
 
-private struct V5DayCell: View {
+private struct V5DayCell: View, Equatable {
     let date: Date
     let calendar: Calendar
     let today: Date
@@ -1584,6 +1397,7 @@ private struct V5DayCell: View {
     let isDraggingTask: Bool
     let isDropTarget: Bool
     let isDropArrival: Bool
+    let reportsGeometry: Bool
     let onSelect: () -> Void
     @State private var hovered = false
 
@@ -1670,16 +1484,18 @@ private struct V5DayCell: View {
                         radius: arrivalPresentation.glowRadius
                     )
                     .background {
-                        GeometryReader { proxy in
-                            let frame = proxy.frame(in: .named("v5-workbench"))
-                            Color.clear.preference(
-                                key: V5DragWorkbenchPointsPreferenceKey.self,
-                                value: {
-                                    var value = V5DragWorkbenchPoints()
-                                    value.dayIndicators[date] = V5TaskDragAnchorGeometry.center(of: frame)
-                                    return value
-                                }()
-                            )
+                        if reportsGeometry {
+                            GeometryReader { proxy in
+                                let frame = proxy.frame(in: .named("v5-workbench"))
+                                Color.clear.preference(
+                                    key: V5DragWorkbenchPointsPreferenceKey.self,
+                                    value: {
+                                        var value = V5DragWorkbenchPoints()
+                                        value.dayIndicators[date] = V5TaskDragAnchorGeometry.center(of: frame)
+                                        return value
+                                    }()
+                                )
+                            }
                         }
                     }
                     if let countText = indicatorLayout.countText {
@@ -1697,11 +1513,13 @@ private struct V5DayCell: View {
             .frame(width: 82, height: 78)
             .contentShape(Rectangle())
             .background {
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: V5DayFramePreferenceKey.self,
-                        value: [date: proxy.frame(in: .named("v5-workbench"))]
-                    )
+                if reportsGeometry {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: V5DayFramePreferenceKey.self,
+                            value: [date: proxy.frame(in: .named("v5-workbench"))]
+                        )
+                    }
                 }
             }
         }
@@ -1717,6 +1535,20 @@ private struct V5DayCell: View {
 
     private var isToday: Bool { calendar.isDate(date, inSameDayAs: today) }
 
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.date == rhs.date
+            && lhs.calendar == rhs.calendar
+            && lhs.today == rhs.today
+            && lhs.isInMonth == rhs.isInMonth
+            && lhs.isSelected == rhs.isSelected
+            && lhs.taskCounts == rhs.taskCounts
+            && lhs.reduceMotion == rhs.reduceMotion
+            && lhs.isDraggingTask == rhs.isDraggingTask
+            && lhs.isDropTarget == rhs.isDropTarget
+            && lhs.isDropArrival == rhs.isDropArrival
+            && lhs.reportsGeometry == rhs.reportsGeometry
+    }
+
     private static let accessibilityFormatter: DateFormatter = {
         let value = DateFormatter(); value.locale = Locale(identifier: "zh_CN"); value.dateFormat = "yyyy年M月d日"; return value
     }()
@@ -1725,6 +1557,7 @@ private struct V5DayCell: View {
 private struct V5TaskDragSession: Equatable {
     let id: UUID
     let taskID: UUID
+    let sourceDate: Date?
     let sourcePoint: CGPoint
     var location: CGPoint
     var targetDate: Date?
@@ -1737,7 +1570,6 @@ private struct V5TaskCompletionFlightSession: Equatable {
     let taskID: UUID
     let title: String
     let dateText: String
-    let sourceIndex: Int
     let sourceFrame: CGRect
     let sourceRingPoint: CGPoint
     let targetPoint: CGPoint
@@ -1747,127 +1579,13 @@ private struct V5TaskCompletionFlightSession: Equatable {
 }
 
 private struct V5PendingTaskCompletion: Equatable {
-    let id: UUID
     let task: CalendarWorkbenchV5Task
-    let sourceIndex: Int
     let sourceFrame: CGRect
     let sourceRingPoint: CGPoint
-}
-
-private struct V5TaskLocalCompletionSession: Equatable {
-    let id: UUID
-    let taskID: UUID
-    let title: String
-    let dateText: String
-    let sourceSection: V5TaskCompletionSourceSection
-    let sourceIndex: Int
-    let sourceFrame: CGRect
-    let sourceRingPoint: CGPoint
-    let becomesCompleted: Bool
-    let wasCompleted: Bool
-    let wasOverdue: Bool
-    var phase: V5TaskLocalCompletionPhase
-}
-
-private struct V5TaskLocalCompletionView: View {
-    let session: V5TaskLocalCompletionSession
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var presentation: V5TaskLocalCompletionPresentation {
-        V5TaskLocalCompletionPresentation.value(for: session.phase)
-    }
-
-    private var isVisuallyCompleted: Bool {
-        session.phase == .card ? session.wasCompleted : session.becomesCompleted
-    }
-
-    private var badgeIsOverdue: Bool {
-        session.phase == .card && session.wasOverdue
-    }
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: isVisuallyCompleted ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(isVisuallyCompleted ? Color.accentColor : Color.secondary)
-                .frame(width: 24, height: 30)
-
-            HStack(spacing: 7) {
-                ZStack {
-                    Capsule()
-                        .fill(
-                            (badgeIsOverdue ? Color.orange : Color.primary)
-                                .opacity(
-                                    badgeIsOverdue
-                                        ? (colorScheme == .dark ? 0.14 : 0.10)
-                                        : (colorScheme == .dark ? 0.08 : 0.055)
-                                )
-                        )
-                    Text(session.dateText)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(badgeIsOverdue ? Color.orange : Color.secondary)
-                }
-                .frame(width: 48, height: 20)
-
-                Text(session.title)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(isVisuallyCompleted ? Color.secondary : Color.primary)
-                    .strikethrough(isVisuallyCompleted)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .frame(width: session.sourceFrame.width, height: session.sourceFrame.height)
-        .background {
-            ZStack {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color.white.opacity(colorScheme == .dark ? 0.04 : 0.28))
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                Color.accentColor.opacity(0.34),
-                                Color.accentColor.opacity(0.13),
-                                Color.accentColor.opacity(0)
-                            ],
-                            center: .leading,
-                            startRadius: 0,
-                            endRadius: 210
-                        )
-                    )
-                    .opacity(presentation.blueBloomOpacity)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(
-                    Color.accentColor.opacity(
-                        session.phase == .acknowledged ? 0.58 : 0.08
-                    ),
-                    lineWidth: session.phase == .acknowledged ? 1.2 : 1
-                )
-        }
-        .shadow(
-            color: Color.accentColor.opacity(
-                session.phase == .acknowledged ? 0.18 : 0
-            ),
-            radius: session.phase == .acknowledged ? 7 : 0
-        )
-        .scaleEffect(x: 1, y: presentation.cardScaleY, anchor: .top)
-        .opacity(presentation.cardOpacity)
-        .position(x: session.sourceFrame.midX, y: session.sourceFrame.midY)
-        .accessibilityHidden(true)
-    }
 }
 
 private struct V5TaskCompletionFlightView: View {
     let session: V5TaskCompletionFlightSession
-
-    @Environment(\.colorScheme) private var colorScheme
 
     private var geometry: V5TaskCompletionFlightGeometry {
         V5TaskCompletionFlightGeometry.value(
@@ -1882,69 +1600,15 @@ private struct V5TaskCompletionFlightView: View {
         session.accent == .overdue ? .orange : Color.primary.opacity(0.86)
     }
 
-    private var shellStrokeColor: Color {
-        session.phase == .card ? Color.primary.opacity(0.06) : ringColor
-    }
-
-    private var cardFill: Color {
-        Color.white.opacity(colorScheme == .dark ? 0.04 : 0.28)
-    }
-
-    private var cardScaleAnchor: UnitPoint {
-        let width = max(session.sourceFrame.width, 1)
-        let height = max(session.sourceFrame.height, 1)
-        return UnitPoint(
-            x: min(1, max(0, (session.sourceRingPoint.x - session.sourceFrame.minX) / width)),
-            y: min(1, max(0, (session.sourceRingPoint.y - session.sourceFrame.minY) / height))
-        )
-    }
-
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: geometry.shellCornerRadius, style: .continuous)
-                .fill(
-                    cardFill.opacity(geometry.shellFillOpacity)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: geometry.shellCornerRadius, style: .continuous)
-                        .strokeBorder(shellStrokeColor, lineWidth: geometry.shellStrokeWidth)
-                }
-                .frame(width: geometry.shellSize.width, height: geometry.shellSize.height)
-                .shadow(
-                    color: ringColor.opacity(session.phase == .card ? 0 : 0.58),
-                    radius: session.phase == .traveling ? 4 : 7
-                )
-                .position(geometry.shellCenter)
-
-            HStack(spacing: 10) {
-                Circle().strokeBorder(ringColor, lineWidth: 1.7)
-                    .frame(width: 20, height: 20)
-                ZStack {
-                    Capsule()
-                        .fill(
-                            ringColor.opacity(
-                                session.accent == .overdue
-                                    ? (colorScheme == .dark ? 0.14 : 0.10)
-                                    : (colorScheme == .dark ? 0.08 : 0.055)
-                            )
-                        )
-                    Text(session.dateText)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(
-                            session.accent == .overdue ? Color.orange : Color.secondary
-                        )
-                }
-                .frame(width: 48, height: 20)
-                Text(session.title)
-                    .font(.system(size: 14, weight: .medium))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .frame(width: session.sourceFrame.width, height: session.sourceFrame.height)
-            .scaleEffect(geometry.contentScale, anchor: cardScaleAnchor)
-            .opacity(geometry.contentOpacity)
-            .position(x: session.sourceFrame.midX, y: session.sourceFrame.midY)
+            Circle()
+                .strokeBorder(ringColor, lineWidth: session.phase == .arrived ? 1.35 : 2)
+                .frame(width: geometry.ringDiameter, height: geometry.ringDiameter)
+                .opacity(geometry.ringOpacity)
+                .shadow(color: ringColor.opacity(session.phase == .arrived ? 0.36 : 0.58),
+                        radius: session.phase == .arrived ? 3 : 7)
+                .position(geometry.ringCenter)
         }
         .accessibilityHidden(true)
     }

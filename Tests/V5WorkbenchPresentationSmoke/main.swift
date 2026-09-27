@@ -128,9 +128,9 @@ struct V5WorkbenchPresentationSmoke {
         precondition(V5TaskDragPresentation.absorbing.scale == 1)
         precondition(V5TaskDragPresentation.absorbing.opacity == 1,
                      "the landing orb must be visually identical to the real calendar marker")
-        precondition(V5TaskDropAnimationTiming.modelCommitDelay <
+        precondition(V5TaskDropAnimationTiming.modelCommitDelay ==
                      V5TaskDropAnimationTiming.absorbDuration,
-                     "the date must commit before the independent drag orb finishes absorbing")
+                     "the 2.0.4 task baseline keeps the source card alive until the drag orb lands")
         precondition(!V5TaskDragPresentation.returning.showsTitle,
                      "a cancelled drop must stay the same ring instead of turning into a task capsule")
 
@@ -141,63 +141,54 @@ struct V5WorkbenchPresentationSmoke {
             for: .card, sourceFrame: completionSource,
             sourceRing: completionSourceRing, target: completionTarget
         )
-        precondition(completionCard.shellCenter == CGPoint(x: 880, y: 276))
-        precondition(completionCard.shellSize == completionSource.size)
-        precondition(completionCard.shellCornerRadius == 11)
-        precondition(completionCard.contentScale == 1 && completionCard.contentOpacity == 1,
-                     "completion must begin from one complete rendered card shell")
+        precondition(completionCard.cardCenter == CGPoint(x: 880, y: 276))
+        precondition(completionCard.cardScale == 1 && completionCard.cardOpacity == 1,
+                     "completion must begin from the complete rendered card")
         let completionOrb = V5TaskCompletionFlightGeometry.value(
-            for: .collapsing, sourceFrame: completionSource,
+            for: .orb, sourceFrame: completionSource,
             sourceRing: completionSourceRing, target: completionTarget
         )
-        precondition(completionOrb.shellCenter == completionSourceRing,
-                     "the same shell must collapse onto the card's own completion circle")
-        precondition(completionOrb.shellSize == CGSize(width: 18, height: 18))
-        precondition(completionOrb.shellCornerRadius == 9)
-        precondition(completionOrb.contentOpacity == 0,
-                     "text and date must be absorbed into the single orange shell")
+        precondition(completionOrb.ringCenter == completionSourceRing,
+                     "the ring must be born at the card's own completion circle, never its center")
+        precondition(completionOrb.cardOpacity == 0)
+        precondition(completionOrb.ringDiameter == 14 && completionOrb.ringOpacity == 1,
+                     "the rectangular card must hand off to a real circle before travel")
         let completionArrival = V5TaskCompletionFlightGeometry.value(
-            for: .traveling, sourceFrame: completionSource,
+            for: .arrived, sourceFrame: completionSource,
             sourceRing: completionSourceRing, target: completionTarget
         )
-        precondition(completionArrival.shellCenter == completionTarget)
-        precondition(completionArrival.shellSize == CGSize(width: 7, height: 7),
-                     "the same orange shell must finish at calendar-indicator size")
-        precondition(V5TaskCompletionSourceSlotPolicy.holdsSlot(during: .card))
-        precondition(V5TaskCompletionSourceSlotPolicy.holdsSlot(during: .collapsing),
-                     "the next row must not move through a card that is still collapsing")
-        precondition(!V5TaskCompletionSourceSlotPolicy.holdsSlot(during: .traveling),
-                     "the source slot may close only after the orb has formed")
-        precondition(V5TaskCompletionFlightTiming.collapseStartDelay > 0,
-                     "the complete source card must render before its morph begins")
-        precondition(V5TaskCompletionFlightTiming.collapseDuration >= 0.28,
-                     "the card-to-ring morph must remain perceptible at 60 fps")
-        precondition(V5TaskCompletionFlightTiming.totalDuration ==
-                     V5TaskCompletionFlightTiming.collapseStartDelay +
+        precondition(completionArrival.ringCenter == completionTarget)
+        precondition(completionArrival.ringDiameter == 7,
+                     "the final frame must exactly match the calendar indicator")
+        precondition(V5TaskCompletionFlightTiming.modelCommitDelay ==
                      V5TaskCompletionFlightTiming.collapseDuration +
                      V5TaskCompletionFlightTiming.travelDuration,
-                     "the visual flight must have one continuous collapse-and-travel duration")
+                     "arrival and model completion must be one event with no second stop")
         precondition(V5TaskCompletionFlightTiming.reducedMotionCommitDelay <
-                     V5TaskCompletionFlightTiming.totalDuration)
+                     V5TaskCompletionFlightTiming.modelCommitDelay)
         precondition(V5TaskCompletionAccent.resolve(isOverdue: true) == .overdue)
         precondition(V5TaskCompletionAccent.resolve(isOverdue: false) == .standard)
 
-        let localCard = V5TaskLocalCompletionPresentation.value(for: .card)
-        let localAcknowledged = V5TaskLocalCompletionPresentation.value(for: .acknowledged)
-        let localCollapsing = V5TaskLocalCompletionPresentation.value(for: .collapsing)
-        precondition(localCard.sourceSlotHeightScale == 1)
-        precondition(!localCard.showsCompletedState)
-        precondition(localAcknowledged.sourceSlotHeightScale == 1,
-                     "an inline completion must stay in its original slot long enough to be understood")
-        precondition(localAcknowledged.showsCompletedState)
-        precondition(localAcknowledged.cardOpacity == 1,
-                     "the completed checkmark and strike-through must be fully visible before collapse")
-        precondition(localCollapsing.sourceSlotHeightScale == 0)
-        precondition(localCollapsing.cardOpacity == 0)
-        precondition(V5TaskLocalCompletionTiming.acknowledgementDuration > 0)
-        precondition(V5TaskLocalCompletionTiming.holdDuration >= 0.12,
-                     "today's completed state needs a perceptible hold instead of disappearing instantly")
-        precondition(V5TaskLocalCompletionTiming.totalDuration >= 0.5)
+        precondition(V5MotionGeometryFeedbackPolicy.acceptsUpdate(
+            isMonthTransitioning: false,
+            isTaskDragging: false,
+            hasCompletionMotion: false
+        ), "stable screens must keep geometry available for the next gesture")
+        precondition(!V5MotionGeometryFeedbackPolicy.acceptsUpdate(
+            isMonthTransitioning: true,
+            isTaskDragging: false,
+            hasCompletionMotion: false
+        ), "calendar scrolling must not feed moving geometry back into the root view")
+        precondition(!V5MotionGeometryFeedbackPolicy.acceptsUpdate(
+            isMonthTransitioning: false,
+            isTaskDragging: true,
+            hasCompletionMotion: false
+        ), "direct manipulation must use the geometry captured before the drag")
+        precondition(!V5MotionGeometryFeedbackPolicy.acceptsUpdate(
+            isMonthTransitioning: false,
+            isTaskDragging: false,
+            hasCompletionMotion: true
+        ), "card completion must not remeasure the list while it is animating")
 
         var completionCalendar = Calendar(identifier: .gregorian)
         completionCalendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
@@ -246,36 +237,22 @@ struct V5WorkbenchPresentationSmoke {
         let completionTask = UUID()
         let completionSession = UUID()
         var lifecycle = V5TaskCompletionLifecycle()
-        precondition(lifecycle.begin(
-            sessionID: completionSession,
-            taskID: completionTask
-        )?.taskID == completionTask,
-        "starting the visual flight must return the task command for immediate commit")
+        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
         precondition(lifecycle.navigate() == [],
-                     "navigation cancels only visual coordinates; task data was already committed")
+                     "changing the selected date must never commit a flight early")
         precondition(lifecycle.arrive(sessionID: completionSession) == nil,
                      "navigation must cancel stale flight coordinates")
-        precondition(lifecycle.begin(
-            sessionID: completionSession,
-            taskID: completionTask
-        )?.taskID == completionTask)
+        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
         precondition(lifecycle.calendarChanged() == [],
-                     "changing the visible month cancels stale geometry without undoing completion")
+                     "changing the visible month must cancel stale geometry without committing")
         precondition(lifecycle.arrive(sessionID: completionSession) == nil,
-                     "a cancelled visual flight must not finish at its old coordinate")
-        precondition(lifecycle.begin(
-            sessionID: completionSession,
-            taskID: completionTask
-        )?.taskID == completionTask)
+                     "a cancelled flight must not commit at its old coordinate")
+        lifecycle.begin(sessionID: completionSession, taskID: completionTask)
         precondition(lifecycle.arrive(sessionID: completionSession) == completionTask,
-                     "arrival closes only its own visual flight without a second data mutation")
-        let cancelledTask = UUID()
-        precondition(lifecycle.begin(
-            sessionID: UUID(),
-            taskID: cancelledTask
-        )?.taskID == cancelledTask)
+                     "completion may commit only when its own flight arrives")
+        lifecycle.begin(sessionID: UUID(), taskID: UUID())
         precondition(lifecycle.cancelAll().isEmpty,
-                     "closing the preview cancels visuals without rolling completed data back")
+                     "closing the preview cancels unfinished flights without changing task data")
 
         precondition(!V5TaskListOverflowPresentation.disablesScrollClipping,
                      "task rows must never render across the composer or footer")
@@ -347,8 +324,9 @@ struct V5WorkbenchPresentationSmoke {
                      "completion must update section membership atomically without old/new rows overlapping")
         precondition(V5TaskListAnimationPolicy.animatesWholeList(for: .completedDisclosureChanged),
                      "expanding completed work may keep the deliberate list transition")
-        precondition(V5TaskDropAnimationTiming.modelCommitDelay == 0,
-                     "the reassigned date must become authoritative on release, before visual absorption finishes")
+        precondition(V5TaskDropAnimationTiming.modelCommitDelay ==
+                     V5TaskDropAnimationTiming.absorbDuration,
+                     "the 2.0.4 task baseline keeps the source card alive until the drag orb lands")
 
         precondition(V5DayCellEmphasis.resolve(
             isDraggingTask: true,
@@ -547,8 +525,12 @@ struct V5WorkbenchPresentationSmoke {
         precondition(backwardRail.sourceOffsetY == -4 * V5CalendarMonthRailPresentation.rowPitch)
         precondition(backwardRail.targetOffsetY == 0)
         precondition(!V5CalendarMonthRailPresentation.usesOpacityReplacement)
-        precondition(V5CalendarMonthRailPresentation.installationDelay >= 1.0 / 60.0,
-                     "the source rail needs at least one display pass before motion starts")
+        precondition(V5CalendarMonthRailPresentation.installationDelay == 0,
+                     "month motion must start on the next display transaction without an artificial pause")
+        precondition(!V5CalendarMonthRailPresentation.reportsLiveGeometryDuringTransition,
+                     "moving date cells must not publish frame preferences on every animation frame")
+        precondition(V5CalendarMonthRailPresentation.compositesMovingRail,
+                     "the prepared date rail must move as one composited visual layer")
         precondition(V5CalendarMonthRailPresentation.headerControlOpacity == 1,
                      "month motion must never dim the year or Today controls")
 

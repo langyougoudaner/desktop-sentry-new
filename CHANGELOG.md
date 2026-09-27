@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.7 build 27 — consistent task-card completion and dates
+
+- Kept the original task card as the sole completion source, then hid it through arrival so repeated complete/restore cycles cannot flash or skip the collapse-and-flight sequence.
+- Deferred persistence of a historical overdue completion until its ring reaches the task's original date.
+- Resolved task actions and stable SwiftUI rows by UUID so reused cards always read the current due date and completion state.
+- Made a date drop publish list membership, date text, and overdue color as one task-list mutation before the landing feedback begins.
+- Synchronized cached editor dates and reminders after a drag while preserving unsaved title and detail edits.
+- Replaced the two-layer date-label transition with one authoritative animated label.
+- Preserved the accepted Calendar V5 controls, panel geometry, task dragging, UUIDs, persistence formats, and other modules.
+
+## 2.0.6 build 26 — stable task-card baseline
+
+- Kept the accepted 2.0.5 calendar rail, keyboard navigation, and unified year/month chooser.
+- Restored the task-card rendering and motion path from the accepted 2.0.4 baseline.
+- Removed the synthetic completion source slots and the separate same-day completion overlay that made card motion and list layout compete.
+- Restored one native list transition for same-day completion and the original card-to-ring flight for overdue completion.
+- Restored the original drag landing cadence while retaining the current date ownership, reminder, and persistence model.
+- Established this release as the clean starting point for the next task-card redesign; no new card design is included.
+
 ## 2.0.5 build 25 — continuous calendar motion and clear completion feedback
 
 - Replaced month-view swapping with a shared chronological week rail that scrolls vertically between adjacent months.

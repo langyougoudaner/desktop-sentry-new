@@ -15,6 +15,7 @@ credentials/
 private/
 backups/
 docs/product/approved/evidence/
+docs/handoff/2026-08-29-new-window/
 *.mov
 *.app.backup
 *.pem
